@@ -42,6 +42,8 @@ jobs:
             python3 python3-pip cpio kmod ca-certificates \
             zstd patchelf device-tree-compiler
           aarch64-linux-gnu-gcc --version | head -1
+          # Verify the cross assembler is present and works
+          aarch64-linux-gnu-as --version | head -1
 
       - name: Download Clang toolchain via AntMan
         run: |
@@ -58,20 +60,54 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Patch kernel - exempt VDSO from LLVM IAS
+      - name: Create aarch64-as wrapper
+        run: |
+          # Create a wrapper directory that sits on PATH BEFORE clang.
+          # When clang invokes "as" with LLVM_IAS=0, it will find this
+          # wrapper which delegates to aarch64-linux-gnu-as.
+          mkdir -p ${{ github.workspace }}/toolchain/wrappers
+
+          # Wrapper for bare "as" — used by scripts/mod and other host-side
+          # assembly that clang drives through the cross triple.
+          cat > ${{ github.workspace }}/toolchain/wrappers/aarch64-linux-gnu-as <<'EOF'
+          #!/bin/bash
+          exec /usr/bin/aarch64-linux-gnu-as "$@"
+          EOF
+          chmod +x ${{ github.workspace }}/toolchain/wrappers/aarch64-linux-gnu-as
+
+          echo "Wrapper created:"
+          ls -la ${{ github.workspace }}/toolchain/wrappers/
+
+      - name: Patch kernel VDSO and scripts/mod Makefiles
         working-directory: kernel
         run: |
           echo "=== arch/arm64/kernel/vdso/Makefile (before patch) ==="
           cat arch/arm64/kernel/vdso/Makefile
 
-          # The old MTK gettimeofday.S uses GNU assembler macro syntax that
-          # LLVM's integrated assembler (IAS) cannot parse. We must force the
-          # VDSO subdirectory to use the external GNU assembler (aarch64-linux-gnu-as)
-          # by overriding LLVM_IAS to 0 for this directory only.
-          if ! grep -q "LLVM_IAS.*0" arch/arm64/kernel/vdso/Makefile; then
-            # Insert the override at the top of the Makefile (after any initial comments)
-            sed -i '1s|^|# Override: use GNU assembler for VDSO (IAS cannot parse old MTK .S syntax)\nLLVM_IAS := 0\nKBUILD_AFLAGS += --target=aarch64-linux-gnu\n\n|' arch/arm64/kernel/vdso/Makefile
-            echo "[patch] VDSO Makefile patched to disable IAS"
+          # The VDSO gettimeofday.S uses GNU assembler macro syntax that
+          # LLVM IAS cannot handle. Disable IAS for this directory and
+          # point clang at the cross assembler via -B.
+          if ! grep -q "fno-integrated-as" arch/arm64/kernel/vdso/Makefile; then
+            sed -i '1s|^|# Use GNU assembler for VDSO — IAS cannot parse old MTK .S syntax\n\n|' \
+              arch/arm64/kernel/vdso/Makefile
+            # Append to the file so it overrides any existing aflags
+            cat >> arch/arm64/kernel/vdso/Makefile <<'PATCH'
+
+# Force external GNU assembler for VDSO assembly files
+KBUILD_AFLAGS_vdso := $(filter-out -integrated-as,$(KBUILD_AFLAGS))
+AFLAGS_gettimeofday.o += -fno-integrated-as -B/usr/aarch64-linux-gnu/bin
+PATCH
+            echo "[patch] arch/arm64/kernel/vdso/Makefile done"
+          fi
+
+          # scripts/mod has the same problem — patch it too
+          if ! grep -q "fno-integrated-as" scripts/mod/Makefile; then
+            cat >> scripts/mod/Makefile <<'PATCH'
+
+# Force external GNU assembler for scripts/mod
+ccflags-y += -fno-integrated-as -B/usr/aarch64-linux-gnu/bin
+PATCH
+            echo "[patch] scripts/mod/Makefile done"
           fi
 
           echo "=== arch/arm64/kernel/vdso/Makefile (after patch) ==="
@@ -80,7 +116,11 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         run: |
-          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          export PATH="${{ env.CLANG_DIR }}/bin:${{ github.workspace }}/toolchain/wrappers:${PATH}"
+
+          # Verify the right assembler is found
+          which aarch64-linux-gnu-as
+          aarch64-linux-gnu-as --version | head -1
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
