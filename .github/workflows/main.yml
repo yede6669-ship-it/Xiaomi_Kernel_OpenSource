@@ -1,69 +1,150 @@
-name: Build Kernel
+name: Build Camellia Kernel
 
 on:
-  workflow_dispatch:   # 手动触发
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
+    name: Build Kernel (camellia-r-oss)
     runs-on: ubuntu-22.04
+
     steps:
+      # ── 1. 检出内核源码 ──────────────────────────────────────────
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: MiCode/Xiaomi_Kernel_OpenSource
+          ref: camellia-r-oss
+          path: kernel
+          fetch-depth: 1
 
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
+      # ── 2. 安装编译依赖 ──────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev \
+            liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python3-pip cpio kmod
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          bc bison flex libssl-dev libelf-dev \
-          python3 make gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi zip
+      # ── 3. 下载 Clang 工具链 ─────────────────────────────────────
+      - name: Download Clang toolchain
+        run: |
+          mkdir -p ${{ github.workspace }}/toolchain/clang
+          cd ${{ github.workspace }}/toolchain/clang
+          # 使用 AOSP prebuilt Clang r383902b（适配 Android R / MTK）
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902b.tar.gz \
+            -O clang.tar.gz || \
+          # 备用：从 GitHub 镜像下载
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220825-release/Clang-14.0.6-20220825.tar.gz \
+            -O clang.tar.gz
+          tar -xzf clang.tar.gz
+          echo "CLANG_PATH=${{ github.workspace }}/toolchain/clang/bin" >> $GITHUB_ENV
 
-    - name: Download Clang toolchain
-      run: |
-        mkdir ~/clang
-        wget -q https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220717-release/Clang-14.0.6-20220717.tar.gz
-        tar -xzf Clang-14.0.6-20220717.tar.gz -C ~/clang
+      # ── 4. 下载 GCC 交叉编译工具链（aarch64 + arm） ─────────────
+      - name: Download GCC toolchains
+        run: |
+          mkdir -p ${{ github.workspace }}/toolchain/gcc64
+          mkdir -p ${{ github.workspace }}/toolchain/gcc32
 
-    - name: Clone MTK kernel modules
-      run: |
-        git clone --depth=1 -b camellia-r-oss \
-          https://github.com/MiCode/MTK_kernel_modules.git ../kernel_modules
+          # aarch64-linux-android-4.9
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            ${{ github.workspace }}/toolchain/gcc64
 
-    - name: Build kernel
-      run: |
-        export ARCH=arm64
-        export PATH="~/clang/bin:$PATH"
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          # arm-linux-androideabi-4.9
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+            ${{ github.workspace }}/toolchain/gcc32
 
-        make ARCH=arm64 O=out \
-          CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          camellia_defconfig
+          echo "GCC64_PATH=${{ github.workspace }}/toolchain/gcc64/bin" >> $GITHUB_ENV
+          echo "GCC32_PATH=${{ github.workspace }}/toolchain/gcc32/bin" >> $GITHUB_ENV
 
-        make ARCH=arm64 O=out \
-          CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          -j$(nproc)
+      # ── 5. 设置 ccache 加速（可选，加快二次编译） ────────────────
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 2G
+          key: camellia-r-oss-${{ runner.os }}
 
-    - name: Package with AnyKernel3
-      run: |
-        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
-        cp out/arch/arm64/boot/Image.gz-dtb AK3/
-        sed -i 's/do.devicecheck=1/do.devicecheck=0/' AK3/anykernel.sh
-        cd AK3 && zip -r9 ../kernel-camellia.zip * -x .git
+      # ── 6. 编译内核 ───────────────────────────────────────────────
+      - name: Build kernel
+        working-directory: kernel
+        env:
+          ARCH: arm64
+          SUBARCH: arm64
+          CLANG_TRIPLE: aarch64-linux-gnu-
+          CROSS_COMPILE: ${{ env.GCC64_PATH }}/aarch64-linux-android-
+          CROSS_COMPILE_ARM32: ${{ env.GCC32_PATH }}/arm-linux-androideabi-
+          PATH: ${{ env.CLANG_PATH }}:${{ env.GCC64_PATH }}:${{ env.GCC32_PATH }}:${{ env.PATH }}
+          CC: clang
+          LLVM: 1
+          LLVM_IAS: 1
+        run: |
+          export PATH="${{ env.CLANG_PATH }}:${{ env.GCC64_PATH }}:${{ env.GCC32_PATH }}:$PATH"
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-camellia
-        path: kernel-camellia.zip
-        retention-days: 7
+          # 使用 camellia 的 defconfig（MTK 平台）
+          make O=out \
+               ARCH=arm64 \
+               CC=clang \
+               CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-android- \
+               CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+               LLVM=1 \
+               LLVM_IAS=1 \
+               camellia_defconfig
+
+          # 开始编译，使用所有可用 CPU 核心
+          make O=out \
+               ARCH=arm64 \
+               CC=clang \
+               CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-android- \
+               CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+               LLVM=1 \
+               LLVM_IAS=1 \
+               -j$(nproc --all) 2>&1 | tee build.log
+
+      # ── 7. 检查产物是否存在 ───────────────────────────────────────
+      - name: Check build output
+        run: |
+          echo "=== Checking kernel image ==="
+          ls -lh kernel/out/arch/arm64/boot/ || true
+          ls -lh kernel/out/arch/arm64/boot/Image.gz-dtb 2>/dev/null && \
+            echo "✅ Image.gz-dtb found!" || \
+            echo "⚠️  Image.gz-dtb not found, checking alternatives..."
+          ls -lh kernel/out/arch/arm64/boot/Image.gz 2>/dev/null || true
+          ls -lh kernel/out/arch/arm64/boot/Image 2>/dev/null || true
+
+      # ── 8. 上传编译产物 ───────────────────────────────────────────
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellia-kernel-${{ github.run_number }}
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/dtbo.img
+            kernel/build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ── 9. 上传编译日志（失败时也上传） ──────────────────────────
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failed-${{ github.run_number }}
+          path: kernel/build.log
+          retention-days: 3
