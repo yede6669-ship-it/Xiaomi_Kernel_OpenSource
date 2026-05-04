@@ -10,7 +10,6 @@ on:
   workflow_dispatch:
 
 env:
-  # 硬编码工具链路径，避免 GITHUB_ENV 跨步骤传递失效
   CLANG_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/clang
   GCC64_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/gcc64
   GCC32_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/gcc32
@@ -21,7 +20,6 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # ── 1. 检出内核源码 ──────────────────────────────────────────
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -30,7 +28,6 @@ jobs:
           path: kernel
           fetch-depth: 1
 
-      # ── 2. 安装编译依赖 ──────────────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
@@ -42,27 +39,18 @@ jobs:
             libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python3-pip cpio kmod
-          echo "=== System make check ==="
-          which make
-          make --version | head -1
-          echo "✅ Build tools ready"
+          which make && make --version | head -1
 
-      # ── 3. 下载 Clang 工具链 ─────────────────────────────────────
       - name: Download Clang toolchain
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
-          cd ${{ env.CLANG_DIR }}
-          echo "Downloading Clang..."
           wget --progress=dot:giga \
-            https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220825-release/Clang-14.0.6-20220825.tar.gz \
+            https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz \
             -O clang.tar.gz
-          tar -xzf clang.tar.gz
+          tar -xzf clang.tar.gz -C ${{ env.CLANG_DIR }}
           rm clang.tar.gz
-          echo "=== Clang check ==="
-          ls ${{ env.CLANG_DIR }}/bin/clang
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
 
-      # ── 4. 下载 GCC 工具链 ───────────────────────────────────────
       - name: Download GCC toolchains
         run: |
           git clone --depth=1 \
@@ -71,62 +59,43 @@ jobs:
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             ${{ env.GCC32_DIR }}
-          echo "=== GCC check ==="
-          ls ${{ env.GCC64_DIR }}/bin/aarch64-linux-android-gcc
-          ls ${{ env.GCC32_DIR }}/bin/arm-linux-androideabi-gcc
 
-      # ── 5. ccache 加速 ────────────────────────────────────────────
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      # ── 6. 编译内核 ───────────────────────────────────────────────
       - name: Build kernel
         working-directory: kernel
         run: |
-          # 将工具链路径追加到系统 PATH 前面（保留系统 PATH 中的 make 等工具）
           export PATH="${{ env.CLANG_DIR }}/bin:${{ env.GCC64_DIR }}/bin:${{ env.GCC32_DIR }}/bin:${PATH}"
+          which make && make --version | head -1
+          which clang && clang --version | head -1
 
-          echo "=== Tool check ==="
-          which make   && make --version | head -1
-          which clang  && clang --version | head -1
-          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1
-          echo "=================="
-
-          # 生成 defconfig
           make O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
+            ARCH=arm64 SUBARCH=arm64 \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            LLVM=1 \
-            LLVM_IAS=1 \
+            LLVM=1 LLVM_IAS=1 \
             camellia_defconfig
 
-          # 编译（使用所有核心）
           make O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
+            ARCH=arm64 SUBARCH=arm64 \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            LLVM=1 \
-            LLVM_IAS=1 \
+            LLVM=1 LLVM_IAS=1 \
             -j$(nproc --all) 2>&1 | tee build.log
 
-      # ── 7. 检查产物 ───────────────────────────────────────────────
       - name: Check build output
         if: always()
         run: |
-          echo "=== Boot artifacts ==="
           ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
 
-      # ── 8. 上传内核产物 ───────────────────────────────────────────
       - name: Upload kernel image
         if: success()
         uses: actions/upload-artifact@v4
@@ -140,7 +109,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # ── 9. 失败时上传日志 ─────────────────────────────────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
