@@ -45,7 +45,7 @@ jobs:
             libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python3-pip cpio kmod ca-certificates \
-            zstd patchelf
+            zstd patchelf device-tree-compiler
           aarch64-linux-gnu-gcc --version | head -1
           openssl version
 
@@ -55,66 +55,9 @@ jobs:
           cd ${{ env.CLANG_DIR }}
           curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
           chmod +x antman
-          # 下载最新版本
           ./antman -S=10032024
-          # 打 glibc 补丁，解决 ubuntu:20.04 的 GLIBC 版本过旧问题
           ./antman --patch=glibc
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
-
-      - name: Patch Clang assembler
-        run: |
-          CLANG_BIN=${{ env.CLANG_DIR }}/bin
-
-          mv $CLANG_BIN/as $CLANG_BIN/as.real
-
-          printf '%s\n' \
-            '#!/bin/bash' \
-            'IS_ARM=0' \
-            'NEWARGS=()' \
-            'for arg in "$@"; do' \
-            '  case "$arg" in' \
-            '    -EL|-EB) IS_ARM=1 ;;' \
-            '    --target=aarch64*) IS_ARM=1 ; NEWARGS+=("$arg") ;;' \
-            '    --target=arm*) IS_ARM=1 ; NEWARGS+=("$arg") ;;' \
-            '    *) NEWARGS+=("$arg") ;;' \
-            '  esac' \
-            'done' \
-            'if [ "$IS_ARM" = "1" ]; then' \
-            '  exec "$(dirname "$0")/clang" --target=aarch64-linux-gnu -integrated-as -c "${NEWARGS[@]}"' \
-            'else' \
-            '  exec /usr/bin/as "$@"' \
-            'fi' \
-            > $CLANG_BIN/as
-
-          printf '%s\n' \
-            '#!/bin/bash' \
-            'NEWARGS=()' \
-            'for arg in "$@"; do' \
-            '  case "$arg" in' \
-            '    -EL|-EB) ;;' \
-            '    *) NEWARGS+=("$arg") ;;' \
-            '  esac' \
-            'done' \
-            'exec "$(dirname "$0")/clang" --target=aarch64-linux-gnu -integrated-as -c "${NEWARGS[@]}"' \
-            > $CLANG_BIN/aarch64-linux-gnu-as
-
-          printf '%s\n' \
-            '#!/bin/bash' \
-            'NEWARGS=()' \
-            'for arg in "$@"; do' \
-            '  case "$arg" in' \
-            '    -EL|-EB) ;;' \
-            '    *) NEWARGS+=("$arg") ;;' \
-            '  esac' \
-            'done' \
-            'exec "$(dirname "$0")/clang" --target=arm-linux-gnueabihf -integrated-as -c "${NEWARGS[@]}"' \
-            > $CLANG_BIN/arm-linux-gnueabihf-as
-
-          chmod +x $CLANG_BIN/as
-          chmod +x $CLANG_BIN/aarch64-linux-gnu-as
-          chmod +x $CLANG_BIN/arm-linux-gnueabihf-as
-          echo "=== Done patching ==="
-          ls -la $CLANG_BIN/as $CLANG_BIN/as.real
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -140,6 +83,7 @@ jobs:
             OBJDUMP=llvm-objdump
             READELF=llvm-readelf
             STRIP=llvm-strip
+            LLVM=1
             LLVM_IAS=1
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-gnu-
@@ -153,7 +97,7 @@ jobs:
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS AND WARNINGS ==="
-            grep -n -E "error:|Error|fatal:" build.log | head -80 || true
+            grep -n -E "error:|Error|fatal:|undefined" build.log | head -100 || true
             echo "=== LAST 500 LINES ==="
             tail -500 build.log
             exit $BUILD_EXIT
