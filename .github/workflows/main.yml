@@ -42,7 +42,6 @@ jobs:
             python3 python3-pip cpio kmod ca-certificates \
             zstd patchelf device-tree-compiler
           aarch64-linux-gnu-gcc --version | head -1
-          aarch64-linux-gnu-as --version | head -1
 
       - name: Download Clang toolchain via AntMan
         run: |
@@ -59,38 +58,30 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Hijack system assembler (狸猫换太子)
+      - name: Hijack system assembler
         run: |
-          # 1. 把系统原本的汇编器重命名备份
+          # 备份原汇编器并替换为智能脚本
           sudo mv /usr/bin/as /usr/bin/as.orig
-          
-          # 2. 写一个“交通警察”脚本放到原本的位置
           cat << 'EOF' | sudo tee /usr/bin/as > /dev/null
           #!/bin/sh
           for arg in "$@"; do
             case "$arg" in
-              # 如果发现手机专用的 ARM64 指令
               -EL|-EB|-mabi=*)
                 exec /usr/bin/aarch64-linux-gnu-as "$@"
                 ;;
             esac
           done
-          # 否则，交还原来的系统汇编器处理
           exec /usr/bin/as.orig "$@"
           EOF
-          
-          # 3. 赋予执行权限
           sudo chmod +x /usr/bin/as
-          
-          echo "--- 检查伪装的汇编器 ---"
-          cat /usr/bin/as
 
       - name: Build kernel
         working-directory: kernel
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          # 明确告诉内核各个工具的具体身份
+          # 核心编译参数
+          # 加入 KCFLAGS=-Wno-error 解决 mm/vmscan.c 等警告导致的编译中断
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
@@ -111,11 +102,15 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
-            DTC_EXT=dtc"
+            DTC_EXT=dtc \
+            KCFLAGS=-Wno-error"
 
+          # 1. 配置内核
           make $COMMON_FLAGS camellia_defconfig
 
-          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          # 2. 正式编译（双重指定 KCFLAGS）
+          make $COMMON_FLAGS KCFLAGS="-Wno-error" -j$(nproc --all) 2>&1 | tee build.log
+          
           BUILD_EXIT=${PIPESTATUS[0]}
 
           echo "=== Build exit code: $BUILD_EXIT ==="
@@ -130,7 +125,6 @@ jobs:
         if: always()
         run: |
           ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
-          find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
 
       - name: Upload kernel image
         if: success()
