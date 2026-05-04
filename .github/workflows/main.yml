@@ -58,46 +58,71 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
+      - name: Create assembler wrappers
+        run: |
+          WRAPPER_DIR="${{ github.workspace }}/wrapper"
+          CLANG_BIN="${{ env.CLANG_DIR }}/bin/clang"
+          mkdir -p "$WRAPPER_DIR"
+
+          # 用 Python 写 wrapper，避免 shell heredoc 的变量展开问题
+          python3 - "$WRAPPER_DIR" "$CLANG_BIN" << 'PYEOF'
+          import os, sys
+
+          wrapper_dir = sys.argv[1]
+          clang_bin   = sys.argv[2]
+
+          # 裸 as：检测 -EL/-EB 决定走 clang 还是系统 as
+          as_wrapper = f"""#!/bin/sh
+          echo "[WRAPPER as] args: $@" >&2
+          for arg in "$@"; do
+            case "$arg" in
+              -EL|-EB)
+                echo "[WRAPPER as] -> clang aarch64" >&2
+                exec "{clang_bin}" --target=aarch64-linux-gnu -x assembler "$@"
+                ;;
+            esac
+          done
+          echo "[WRAPPER as] -> system /usr/bin/as" >&2
+          exec /usr/bin/as "$@"
+          """
+
+          # aarch64 专用 as
+          aarch64_wrapper = f"""#!/bin/sh
+          echo "[WRAPPER aarch64-as] args: $@" >&2
+          exec "{clang_bin}" --target=aarch64-linux-gnu -x assembler "$@"
+          """
+
+          # arm32 专用 as
+          arm_wrapper = f"""#!/bin/sh
+          echo "[WRAPPER arm-as] args: $@" >&2
+          exec "{clang_bin}" --target=arm-linux-gnueabihf -x assembler "$@"
+          """
+
+          for name, content in [
+              ("as", as_wrapper),
+              ("aarch64-linux-gnu-as", aarch64_wrapper),
+              ("arm-linux-gnueabihf-as", arm_wrapper),
+          ]:
+              path = os.path.join(wrapper_dir, name)
+              with open(path, "w") as f:
+                  f.write(content)
+              os.chmod(path, 0o755)
+              print(f"Created {path}")
+          PYEOF
+
+          echo "=== Wrapper contents ==="
+          cat "$WRAPPER_DIR/as"
+          cat "$WRAPPER_DIR/aarch64-linux-gnu-as"
+
       - name: Build kernel
         working-directory: kernel
         run: |
           WRAPPER_DIR="${{ github.workspace }}/wrapper"
-          mkdir -p "$WRAPPER_DIR"
-
-          # 调试版 wrapper：打印实际调用，再转发给 llvm-as（通过 clang -x assembler）
-          cat > "$WRAPPER_DIR/aarch64-linux-gnu-as" << WRAPPER_EOF
-          #!/bin/sh
-          echo "[WRAPPER aarch64-linux-gnu-as] args: $@" >&2
-          exec "${{ env.CLANG_DIR }}/bin/clang" --target=aarch64-linux-gnu -x assembler "$@"
-          WRAPPER_EOF
-
-          cat > "$WRAPPER_DIR/arm-linux-gnueabihf-as" << WRAPPER_EOF
-          #!/bin/sh
-          echo "[WRAPPER arm-linux-gnueabihf-as] args: $@" >&2
-          exec "${{ env.CLANG_DIR }}/bin/clang" --target=arm-linux-gnueabihf -x assembler "$@"
-          WRAPPER_EOF
-
-          # 裸 as wrapper：判断参数，如果含 -EL/-EB 说明是 aarch64 target，转 clang；否则转系统 as
-          cat > "$WRAPPER_DIR/as" << WRAPPER_EOF
-          #!/bin/sh
-          echo "[WRAPPER as] args: $@" >&2
-          for arg in "$@"; do
-            case "\$arg" in
-              -EL|-EB)
-                echo "[WRAPPER as] detected aarch64/arm target, redirecting to clang" >&2
-                exec "${{ env.CLANG_DIR }}/bin/clang" --target=aarch64-linux-gnu -x assembler "$@"
-                ;;
-            esac
-          done
-          echo "[WRAPPER as] detected host target, using system as" >&2
-          exec /usr/bin/as "$@"
-          WRAPPER_EOF
-
-          chmod +x "$WRAPPER_DIR/aarch64-linux-gnu-as"
-          chmod +x "$WRAPPER_DIR/arm-linux-gnueabihf-as"
-          chmod +x "$WRAPPER_DIR/as"
-
           export PATH="$WRAPPER_DIR:${{ env.CLANG_DIR }}/bin:${PATH}"
+
+          # 验证 wrapper 生效
+          which as
+          which aarch64-linux-gnu-as
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
@@ -123,8 +148,7 @@ jobs:
 
           make $COMMON_FLAGS camellia_defconfig
 
-          # V=1 输出完整命令，方便诊断
-          make $COMMON_FLAGS V=1 -j$(nproc --all) 2>&1 | tee build.log
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
           echo "=== Build exit code: $BUILD_EXIT ==="
