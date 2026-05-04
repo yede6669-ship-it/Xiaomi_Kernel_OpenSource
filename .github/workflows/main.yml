@@ -44,20 +44,21 @@ jobs:
             liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
             libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python3 python3-pip cpio kmod ca-certificates
+            python3 python3-pip cpio kmod ca-certificates \
+            zstd patchelf
           aarch64-linux-gnu-gcc --version | head -1
           openssl version
 
-      - name: Download Clang toolchain
+      - name: Download Clang toolchain via AntMan
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
-          # neutron-clang: 专为旧 GLIBC 系统编译，最低支持 GLIBC 2.17
-          wget --progress=dot:giga \
-            https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/09012023/neutron-clang-09012023.tar.zst \
-            -O clang.tar.zst
-          apt-get install -y --no-install-recommends zstd
-          tar -I zstd -xf clang.tar.zst -C ${{ env.CLANG_DIR }}
-          rm clang.tar.zst
+          cd ${{ env.CLANG_DIR }}
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          # 下载最新版本
+          ./antman -S=10032024
+          # 打 glibc 补丁，解决 ubuntu:20.04 的 GLIBC 版本过旧问题
+          ./antman --patch=glibc
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
 
       - name: Patch Clang assembler
