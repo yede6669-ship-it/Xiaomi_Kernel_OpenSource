@@ -51,11 +51,13 @@ jobs:
       - name: Download Clang toolchain
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
+          # neutron-clang: 专为旧 GLIBC 系统编译，最低支持 GLIBC 2.17
           wget --progress=dot:giga \
-            https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz \
-            -O clang.tar.gz
-          tar -xzf clang.tar.gz -C ${{ env.CLANG_DIR }}
-          rm clang.tar.gz
+            https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/09012023/neutron-clang-09012023.tar.zst \
+            -O clang.tar.zst
+          apt-get install -y --no-install-recommends zstd
+          tar -I zstd -xf clang.tar.zst -C ${{ env.CLANG_DIR }}
+          rm clang.tar.zst
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
 
       - name: Patch Clang assembler
