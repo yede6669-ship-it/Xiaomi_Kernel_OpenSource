@@ -1,3 +1,4 @@
+
 name: Build Camellia Kernel
 
 on:
@@ -29,6 +30,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
+          # 移除了找不到的 box64，保留了所有必要的交叉编译工具
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabihf \
@@ -38,7 +40,7 @@ jobs:
             git gnupg gperf wget tar \
             liblz4-tool libncurses5-dev libssl-dev \
             libxml2 libxml2-utils lzop pngcrush \
-            rsync libglib2.0-dev box64 \
+            rsync libglib2.0-dev schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python3-pip cpio kmod ca-certificates \
             zstd patchelf device-tree-compiler
           aarch64-linux-gnu-gcc --version | head -1
@@ -60,7 +62,7 @@ jobs:
 
       - name: Hijack system assembler
         run: |
-          # 备份原汇编器并替换为智能脚本，确保 Clang 能正确调用 aarch64 汇编器
+          # 解决旧版内核与新版 Clang 汇编器不匹配的问题
           sudo mv /usr/bin/as /usr/bin/as.orig
           cat << 'EOF' | sudo tee /usr/bin/as > /dev/null
           #!/bin/sh
@@ -80,12 +82,12 @@ jobs:
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          # 核心编译参数：KCFLAGS=-Wno-error 是解决你报错的关键
-          # 它会强制编译器忽略那些没用的变量定义警告，不让它们中断编译
+          # 核心编译参数：KCFLAGS=-Wno-error 是解决 mm/vmscan.c 报错的唯一办法
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
+            AS=aarch64-linux-gnu-as \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -104,44 +106,45 @@ jobs:
             DTC_EXT=dtc \
             KCFLAGS=-Wno-error"
 
-          # 1. 生成默认配置
+          # 1. 生成配置
           make $COMMON_FLAGS camellia_defconfig
 
-          # 2. 开始正式编译
-          # 使用所有可用的 CPU 核心，并实时记录日志
-          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          # 2. 正式编译（双重指定 KCFLAGS 确保生效）
+          make $COMMON_FLAGS KCFLAGS="-Wno-error" -j$(nproc --all) 2>&1 | tee build.log
           
           BUILD_EXIT=${PIPESTATUS[0]}
 
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== 关键错误信息展示 ==="
-            grep -iE "error:|fatal:" build.log | tail -n 50 || true
+            echo "=== 关键错误信息 (最后 100 行) ==="
+            grep -iE "error:|fatal:" build.log | head -n 50 || true
+            tail -n 100 build.log
             exit $BUILD_EXIT
           fi
 
       - name: Check build output
         if: always()
         run: |
-          echo "Checking output files..."
-          ls -R kernel/out/arch/arm64/boot/ || echo "No boot files found"
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
 
       - name: Upload kernel image
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: camellia-kernel-output
+          name: camellia-kernel-${{ github.run_number }}
           path: |
             kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel/out/arch/arm64/boot/Image.gz
             kernel/out/arch/arm64/boot/Image
             kernel/out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload build log (For Debugging)
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ github.run_number }}
           path: kernel/build.log
+          if-no-files-found: ignore
           retention-days: 3
