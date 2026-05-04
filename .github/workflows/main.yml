@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  CLANG_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/clang
+  CLANG_DIR: ${{ github.workspace }}/toolchain/clang
 
 jobs:
   build:
@@ -36,24 +36,24 @@ jobs:
             binutils-arm-linux-gnueabihf \
             make bc bison build-essential ccache curl flex \
             git gnupg gperf wget tar \
-            lib32ncurses5-dev lib32readline-dev lib32z1-dev \
-            liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            liblz4-tool libncurses5-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python3-pip cpio kmod ca-certificates \
             zstd patchelf device-tree-compiler
           aarch64-linux-gnu-gcc --version | head -1
-          openssl version
 
       - name: Download Clang toolchain via AntMan
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
           cd ${{ env.CLANG_DIR }}
+          # 确认有效的 antman 脚本地址
           curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
           chmod +x antman
-          ./antman -S=10032024
-          ./antman --patch=glibc
-          ${{ env.CLANG_DIR }}/bin/clang --version | head -1
+          # 使用 -S 获取最新版本，防止旧日期标签导致 404
+          ./antman -S
+          # 直接在 Ubuntu 22.04 运行，不再需要 patch glibc
+          bin/clang --version | head -1
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -68,22 +68,23 @@ jobs:
 
           clang --version | head -1
 
-          COMMON_FLAGS="O=out
-            ARCH=arm64
-            SUBARCH=arm64
-            CC=clang
-            LD=ld.lld
-            AR=llvm-ar
-            NM=llvm-nm
-            OBJCOPY=llvm-objcopy
-            OBJDUMP=llvm-objdump
-            READELF=llvm-readelf
-            STRIP=llvm-strip
-            LLVM=1
-            LLVM_IAS=1
-            CLANG_TRIPLE=aarch64-linux-gnu-
-            CROSS_COMPILE=aarch64-linux-gnu-
-            CROSS_COMPILE_ARM32=arm-linux-gnueabihf-"
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc"
 
           make $COMMON_FLAGS camellia_defconfig
 
@@ -94,8 +95,6 @@ jobs:
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS AND WARNINGS ==="
             grep -n -E "error:|Error|fatal:|undefined" build.log | head -100 || true
-            echo "=== LAST 500 LINES ==="
-            tail -500 build.log
             exit $BUILD_EXIT
           fi
 
