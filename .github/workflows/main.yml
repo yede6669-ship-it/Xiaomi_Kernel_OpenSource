@@ -50,7 +50,6 @@ jobs:
           curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
           chmod +x antman
           ./antman -S
-          # 验证二进制文件权限
           chmod +x bin/*
 
       - name: Setup ccache
@@ -62,21 +61,19 @@ jobs:
       - name: Kernel Source Patching
         working-directory: kernel
         run: |
-          # 1. 物理移除所有 -Werror 标志
+          # 1. 物理移除所有 -Werror 标志，防止警告转错误
           find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g'
           
           # 2. 绕过强制的堆栈保护检查（解决 CONFIG_CC_STACKPROTECTOR_STRONG 报错）
-          # 这个报错是因为编译脚本在检查时没能正确链接到 Clang 库
+          # 直接在 Makefile 里把报错退出改为警告打印
           sed -i 's/$(error Cannot use CONFIG_CC_STACKPROTECTOR_STRONG.*/$(warning Skipping Stack Protector Check)/' Makefile
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          # 明确将 Clang 路径置于 PATH 最前端
-          export PATH="${{ env.CLANG_DIR */bin:${PATH}"
+          # 修复了之前的语法错误：${{ env.CLANG_DIR }} 现在正确闭合
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
           
-          # 强制指定编译器和工具链
-          # 注意：LLVM_IAS=0 有助于解决 "broken .inst" 汇编报错
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
@@ -99,8 +96,7 @@ jobs:
           # 1. 生成配置
           make $COMMON_FLAGS camellia_defconfig
 
-          # 额外修正：在生成的 .config 中再次确认关闭可能导致崩溃的检查
-          # 即使脚本报错，我们也强行尝试下一步
+          # 2. 正式编译
           make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
           
           BUILD_EXIT=${PIPESTATUS[0]}
@@ -119,10 +115,18 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: camellia-kernel-fixed
+          name: camellia-kernel-final
           path: |
             kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel/out/arch/arm64/boot/Image.gz
             kernel/out/arch/arm64/boot/Image
             kernel/out/arch/arm64/boot/dtbo.img
           retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel/build.log
+          retention-days: 3
