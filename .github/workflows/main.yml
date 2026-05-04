@@ -58,23 +58,24 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Patch Kernel Source
+      - name: Patch Kernel Makefile
         working-directory: kernel
         run: |
           # 1. 物理移除所有 -Werror，防止警告变错误
           find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g'
           
-          # 2. 暴力屏蔽堆栈保护检查，防止它因为检测不到编译器能力而报错
+          # 2. 暴力通过编译器检查
+          # 哪怕编译器检查失败，也让它继续执行，不准抛出 Error 1
           sed -i 's/$(error Cannot use CONFIG_CC_STACKPROTECTOR_STRONG.*/$(warning Skipping...)/' Makefile
 
       - name: Build kernel
         working-directory: kernel
         run: |
+          # 严格配置 PATH
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
           
-          # 核心参数：
-          # LLVM_IAS=0：使用传统汇编器，解决 "broken .inst" 错误
-          # CONFIG_CC_STACKPROTECTOR_STRONG=n：直接在命令行关闭报错的功能
+          # 编译参数
+          # 关键：LLVM_IAS=0 使用 GNU 汇编器解决 .inst 错误
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
@@ -92,14 +93,19 @@ jobs:
             HOSTCC=gcc \
             HOSTCXX=g++ \
             LLVM=1 \
-            LLVM_IAS=0 \
-            CONFIG_CC_STACKPROTECTOR_STRONG=n"
+            LLVM_IAS=0"
 
-          # 1. 生成配置
+          # 1. 生成默认配置
           make $COMMON_FLAGS camellia_defconfig
 
-          # 2. 正式编译
-          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          # 2. 【核心修复】手动在生成的 .config 中禁用堆栈保护
+          # 这一步能从根本上跳过内核的那个死掉的检查脚本
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
+
+          # 3. 正式编译
+          # 再次在命令行指定，双重保险
+          make $COMMON_FLAGS CONFIG_CC_STACKPROTECTOR_STRONG=n -j$(nproc --all) 2>&1 | tee build.log
           
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ $BUILD_EXIT -ne 0 ]; then
@@ -111,7 +117,7 @@ jobs:
       - name: Check build output
         if: always()
         run: |
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "Build log check needed"
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "Build did not produce boot files"
 
       - name: Upload kernel image
         if: success()
@@ -129,5 +135,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: full-log
+          name: build-log
           path: kernel/build.log
+          retention-days: 3
