@@ -15,7 +15,7 @@ env:
 jobs:
   build:
     name: Build Kernel (camellia-r-oss)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
 
     steps:
       - name: Checkout kernel source
@@ -58,11 +58,8 @@ jobs:
         run: |
           CLANG_BIN=${{ env.CLANG_DIR }}/bin
 
-          # 备份原始 LLVM as
           mv $CLANG_BIN/as $CLANG_BIN/as.real
 
-          # wrapper: -EL/-EB 说明是 ARM，走 clang integrated-as
-          # --64 等 x86 选项说明是 host，走系统真实的 as
           printf '%s\n' \
             '#!/bin/bash' \
             'IS_ARM=0' \
@@ -82,7 +79,6 @@ jobs:
             'fi' \
             > $CLANG_BIN/as
 
-          # aarch64 交叉编译前缀版本
           printf '%s\n' \
             '#!/bin/bash' \
             'NEWARGS=()' \
@@ -95,7 +91,6 @@ jobs:
             'exec "$(dirname "$0")/clang" --target=aarch64-linux-gnu -integrated-as -c "${NEWARGS[@]}"' \
             > $CLANG_BIN/aarch64-linux-gnu-as
 
-          # arm32 交叉编译前缀版本
           printf '%s\n' \
             '#!/bin/bash' \
             'NEWARGS=()' \
@@ -150,10 +145,10 @@ jobs:
 
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== ALL ERRORS ==="
-            grep -n "error:" build.log | head -50 || true
-            echo "=== LAST 300 LINES ==="
-            tail -300 build.log
+            echo "=== ERRORS AND WARNINGS ==="
+            grep -n -E "error:|Error|fatal:" build.log | head -80 || true
+            echo "=== LAST 500 LINES ==="
+            tail -500 build.log
             exit $BUILD_EXIT
           fi
 
