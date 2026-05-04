@@ -73,19 +73,11 @@ jobs:
           which make && make --version | head -1
           which clang && clang --version | head -1
 
-          # 确认 ld.lld 存在
-          which ld.lld && ld.lld --version | head -1
-
+          # 只用 clang 作为编译器，AR/LD 等仍用 GCC 工具链（MTK Android R 兼容性更好）
           COMMON_FLAGS="O=out
             ARCH=arm64
             SUBARCH=arm64
             CC=clang
-            LD=ld.lld
-            AR=llvm-ar
-            NM=llvm-nm
-            OBJCOPY=llvm-objcopy
-            OBJDUMP=llvm-objdump
-            STRIP=llvm-strip
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-"
