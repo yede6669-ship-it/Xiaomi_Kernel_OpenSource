@@ -11,7 +11,6 @@ on:
 
 env:
   CLANG_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/clang
-  WRAPPER_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/wrapper
 
 jobs:
   build:
@@ -55,34 +54,63 @@ jobs:
           rm clang.tar.gz
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
 
-      - name: Create toolchain wrappers
+      - name: Patch Clang assembler
         run: |
-          mkdir -p ${{ env.WRAPPER_DIR }}
+          CLANG_BIN=${{ env.CLANG_DIR }}/bin
 
-          # aarch64-linux-gnu-as → clang 集成汇编器
-          cat > ${{ env.WRAPPER_DIR }}/aarch64-linux-gnu-as << 'EOF'
+          # 备份原始 LLVM as（不支持 -EL 等 GNU 选项）
+          mv $CLANG_BIN/as $CLANG_BIN/as.real
+
+          # 创建 wrapper：把所有 as 调用转给 clang -integrated-as
+          cat > $CLANG_BIN/as << 'WRAPPER'
           #!/bin/bash
-          # 过滤掉 clang 集成汇编器不认识的选项，直接用 clang -c
-          exec ${{ env.CLANG_DIR }}/bin/clang \
-            --target=aarch64-linux-gnu \
-            -integrated-as \
-            -c "$@"
-          EOF
+          # 解析 --target 或 -EL/-EB 推断目标架构
+          TARGET=""
+          NEWARGS=()
+          for arg in "$@"; do
+            case "$arg" in
+              -EL) TARGET="aarch64-linux-gnu" ;;
+              -EB) TARGET="aarch64-linux-gnu" ;;
+              --target=*) TARGET="${arg#--target=}" ;;
+              *) NEWARGS+=("$arg") ;;
+            esac
+          done
+          [ -z "$TARGET" ] && TARGET="aarch64-linux-gnu"
+          exec "$(dirname "$0")/clang" --target="$TARGET" -integrated-as -c "${NEWARGS[@]}"
+          WRAPPER
 
-          # arm-linux-gnueabihf-as → clang 集成汇编器
-          cat > ${{ env.WRAPPER_DIR }}/arm-linux-gnueabihf-as << 'EOF'
+          chmod +x $CLANG_BIN/as
+
+          # 同样处理 aarch64-linux-gnu-as（CROSS_COMPILE 前缀版本）
+          cat > $CLANG_BIN/aarch64-linux-gnu-as << 'WRAPPER'
           #!/bin/bash
-          exec ${{ env.CLANG_DIR }}/bin/clang \
-            --target=arm-linux-gnueabihf \
-            -integrated-as \
-            -c "$@"
-          EOF
+          NEWARGS=()
+          for arg in "$@"; do
+            case "$arg" in
+              -EL|-EB) ;;  # 丢弃，clang 不需要
+              *) NEWARGS+=("$arg") ;;
+            esac
+          done
+          exec "$(dirname "$0")/clang" --target=aarch64-linux-gnu -integrated-as -c "${NEWARGS[@]}"
+          WRAPPER
 
-          chmod +x ${{ env.WRAPPER_DIR }}/aarch64-linux-gnu-as
-          chmod +x ${{ env.WRAPPER_DIR }}/arm-linux-gnueabihf-as
+          cat > $CLANG_BIN/arm-linux-gnueabihf-as << 'WRAPPER'
+          #!/bin/bash
+          NEWARGS=()
+          for arg in "$@"; do
+            case "$arg" in
+              -EL|-EB) ;;
+              *) NEWARGS+=("$arg") ;;
+            esac
+          done
+          exec "$(dirname "$0")/clang" --target=arm-linux-gnueabihf -integrated-as -c "${NEWARGS[@]}"
+          WRAPPER
 
-          echo "=== Wrapper check ==="
-          cat ${{ env.WRAPPER_DIR }}/aarch64-linux-gnu-as
+          chmod +x $CLANG_BIN/aarch64-linux-gnu-as
+          chmod +x $CLANG_BIN/arm-linux-gnueabihf-as
+
+          echo "=== Patched assemblers ==="
+          ls -la $CLANG_BIN/as $CLANG_BIN/aarch64-linux-gnu-as $CLANG_BIN/arm-linux-gnueabihf-as
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -93,11 +121,11 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         run: |
-          # wrapper 放最前，覆盖系统的 as；Clang bin 紧随其后
-          export PATH="${{ env.WRAPPER_DIR }}:${{ env.CLANG_DIR }}/bin:${PATH}"
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
           clang --version | head -1
-          which aarch64-linux-gnu-as
+          ld.lld --version | head -1
+          echo "AS wrapper: $(cat ${{ env.CLANG_DIR }}/bin/as | head -3)"
 
           COMMON_FLAGS="O=out
             ARCH=arm64
@@ -122,8 +150,10 @@ jobs:
 
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== LAST 200 LINES OF BUILD LOG ==="
-            tail -200 build.log
+            echo "=== ALL ERRORS ==="
+            grep -n "error:" build.log | head -50 || true
+            echo "=== LAST 300 LINES ==="
+            tail -300 build.log
             exit $BUILD_EXIT
           fi
 
