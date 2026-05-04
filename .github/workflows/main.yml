@@ -7,7 +7,13 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
+
+env:
+  # 硬编码工具链路径，避免 GITHUB_ENV 跨步骤传递失效
+  CLANG_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/clang
+  GCC64_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/gcc64
+  GCC32_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/gcc32
 
 jobs:
   build:
@@ -29,48 +35,47 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
-            bc bison build-essential ccache curl flex \
+            make bc bison build-essential ccache curl flex \
             g++-multilib gcc-multilib git gnupg gperf imagemagick \
             lib32ncurses5-dev lib32readline-dev lib32z1-dev \
             liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
             libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python3-pip cpio kmod
+          echo "=== System make check ==="
+          which make
+          make --version | head -1
+          echo "✅ Build tools ready"
 
       # ── 3. 下载 Clang 工具链 ─────────────────────────────────────
       - name: Download Clang toolchain
         run: |
-          mkdir -p ${{ github.workspace }}/toolchain/clang
-          cd ${{ github.workspace }}/toolchain/clang
-          # 使用 AOSP prebuilt Clang r383902b（适配 Android R / MTK）
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902b.tar.gz \
-            -O clang.tar.gz || \
-          # 备用：从 GitHub 镜像下载
-          wget -q https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220825-release/Clang-14.0.6-20220825.tar.gz \
+          mkdir -p ${{ env.CLANG_DIR }}
+          cd ${{ env.CLANG_DIR }}
+          echo "Downloading Clang..."
+          wget --progress=dot:giga \
+            https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220825-release/Clang-14.0.6-20220825.tar.gz \
             -O clang.tar.gz
           tar -xzf clang.tar.gz
-          echo "CLANG_PATH=${{ github.workspace }}/toolchain/clang/bin" >> $GITHUB_ENV
+          rm clang.tar.gz
+          echo "=== Clang check ==="
+          ls ${{ env.CLANG_DIR }}/bin/clang
+          ${{ env.CLANG_DIR }}/bin/clang --version | head -1
 
-      # ── 4. 下载 GCC 交叉编译工具链（aarch64 + arm） ─────────────
+      # ── 4. 下载 GCC 工具链 ───────────────────────────────────────
       - name: Download GCC toolchains
         run: |
-          mkdir -p ${{ github.workspace }}/toolchain/gcc64
-          mkdir -p ${{ github.workspace }}/toolchain/gcc32
-
-          # aarch64-linux-android-4.9
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-            ${{ github.workspace }}/toolchain/gcc64
-
-          # arm-linux-androideabi-4.9
+            ${{ env.GCC64_DIR }}
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
-            ${{ github.workspace }}/toolchain/gcc32
+            ${{ env.GCC32_DIR }}
+          echo "=== GCC check ==="
+          ls ${{ env.GCC64_DIR }}/bin/aarch64-linux-android-gcc
+          ls ${{ env.GCC32_DIR }}/bin/arm-linux-androideabi-gcc
 
-          echo "GCC64_PATH=${{ github.workspace }}/toolchain/gcc64/bin" >> $GITHUB_ENV
-          echo "GCC32_PATH=${{ github.workspace }}/toolchain/gcc32/bin" >> $GITHUB_ENV
-
-      # ── 5. 设置 ccache 加速（可选，加快二次编译） ────────────────
+      # ── 5. ccache 加速 ────────────────────────────────────────────
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -80,54 +85,50 @@ jobs:
       # ── 6. 编译内核 ───────────────────────────────────────────────
       - name: Build kernel
         working-directory: kernel
-        env:
-          ARCH: arm64
-          SUBARCH: arm64
-          CLANG_TRIPLE: aarch64-linux-gnu-
-          CROSS_COMPILE: ${{ env.GCC64_PATH }}/aarch64-linux-android-
-          CROSS_COMPILE_ARM32: ${{ env.GCC32_PATH }}/arm-linux-androideabi-
-          PATH: ${{ env.CLANG_PATH }}:${{ env.GCC64_PATH }}:${{ env.GCC32_PATH }}:${{ env.PATH }}
-          CC: clang
-          LLVM: 1
-          LLVM_IAS: 1
         run: |
-          export PATH="${{ env.CLANG_PATH }}:${{ env.GCC64_PATH }}:${{ env.GCC32_PATH }}:$PATH"
+          # 将工具链路径追加到系统 PATH 前面（保留系统 PATH 中的 make 等工具）
+          export PATH="${{ env.CLANG_DIR }}/bin:${{ env.GCC64_DIR }}/bin:${{ env.GCC32_DIR }}/bin:${PATH}"
 
-          # 使用 camellia 的 defconfig（MTK 平台）
+          echo "=== Tool check ==="
+          which make   && make --version | head -1
+          which clang  && clang --version | head -1
+          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1
+          echo "=================="
+
+          # 生成 defconfig
           make O=out \
-               ARCH=arm64 \
-               CC=clang \
-               CLANG_TRIPLE=aarch64-linux-gnu- \
-               CROSS_COMPILE=aarch64-linux-android- \
-               CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-               LLVM=1 \
-               LLVM_IAS=1 \
-               camellia_defconfig
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            camellia_defconfig
 
-          # 开始编译，使用所有可用 CPU 核心
+          # 编译（使用所有核心）
           make O=out \
-               ARCH=arm64 \
-               CC=clang \
-               CLANG_TRIPLE=aarch64-linux-gnu- \
-               CROSS_COMPILE=aarch64-linux-android- \
-               CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-               LLVM=1 \
-               LLVM_IAS=1 \
-               -j$(nproc --all) 2>&1 | tee build.log
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j$(nproc --all) 2>&1 | tee build.log
 
-      # ── 7. 检查产物是否存在 ───────────────────────────────────────
+      # ── 7. 检查产物 ───────────────────────────────────────────────
       - name: Check build output
+        if: always()
         run: |
-          echo "=== Checking kernel image ==="
-          ls -lh kernel/out/arch/arm64/boot/ || true
-          ls -lh kernel/out/arch/arm64/boot/Image.gz-dtb 2>/dev/null && \
-            echo "✅ Image.gz-dtb found!" || \
-            echo "⚠️  Image.gz-dtb not found, checking alternatives..."
-          ls -lh kernel/out/arch/arm64/boot/Image.gz 2>/dev/null || true
-          ls -lh kernel/out/arch/arm64/boot/Image 2>/dev/null || true
+          echo "=== Boot artifacts ==="
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
 
-      # ── 8. 上传编译产物 ───────────────────────────────────────────
+      # ── 8. 上传内核产物 ───────────────────────────────────────────
       - name: Upload kernel image
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: camellia-kernel-${{ github.run_number }}
@@ -136,15 +137,15 @@ jobs:
             kernel/out/arch/arm64/boot/Image.gz
             kernel/out/arch/arm64/boot/Image
             kernel/out/arch/arm64/boot/dtbo.img
-            kernel/build.log
           if-no-files-found: warn
           retention-days: 7
 
-      # ── 9. 上传编译日志（失败时也上传） ──────────────────────────
-      - name: Upload build log on failure
-        if: failure()
+      # ── 9. 失败时上传日志 ─────────────────────────────────────────
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-failed-${{ github.run_number }}
+          name: build-log-${{ github.run_number }}
           path: kernel/build.log
+          if-no-files-found: ignore
           retention-days: 3
