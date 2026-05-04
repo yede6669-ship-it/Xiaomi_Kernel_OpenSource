@@ -58,71 +58,37 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Create assembler wrappers
+      - name: Patch kernel to force integrated assembler for scripts/mod
+        working-directory: kernel
         run: |
-          WRAPPER_DIR="${{ github.workspace }}/wrapper"
-          CLANG_BIN="${{ env.CLANG_DIR }}/bin/clang"
-          mkdir -p "$WRAPPER_DIR"
+          # scripts/mod/empty.o 是用来探测编译器特性的空文件
+          # 这个老内核的 Makefile 没有正确传递 LLVM_IAS，导致 clang 还是调用外部 as
+          # 直接给 scripts/mod 的编译加上 -integrated-as 强制使用 clang 内置汇编器
+          if grep -q "CFLAGS_REMOVE" scripts/mod/Makefile 2>/dev/null; then
+            echo "Makefile already patched"
+          else
+            echo "" >> scripts/mod/Makefile
+            echo "# Force integrated assembler to avoid external 'as' for cross-compilation" >> scripts/mod/Makefile
+            echo "ccflags-y += -integrated-as" >> scripts/mod/Makefile
+            echo "Patched scripts/mod/Makefile"
+          fi
+          tail -5 scripts/mod/Makefile
 
-          # 用 Python 写 wrapper，避免 shell heredoc 的变量展开问题
-          python3 - "$WRAPPER_DIR" "$CLANG_BIN" << 'PYEOF'
-          import os, sys
-
-          wrapper_dir = sys.argv[1]
-          clang_bin   = sys.argv[2]
-
-          # 裸 as：检测 -EL/-EB 决定走 clang 还是系统 as
-          as_wrapper = f"""#!/bin/sh
-          echo "[WRAPPER as] args: $@" >&2
-          for arg in "$@"; do
-            case "$arg" in
-              -EL|-EB)
-                echo "[WRAPPER as] -> clang aarch64" >&2
-                exec "{clang_bin}" --target=aarch64-linux-gnu -x assembler "$@"
-                ;;
-            esac
-          done
-          echo "[WRAPPER as] -> system /usr/bin/as" >&2
-          exec /usr/bin/as "$@"
-          """
-
-          # aarch64 专用 as
-          aarch64_wrapper = f"""#!/bin/sh
-          echo "[WRAPPER aarch64-as] args: $@" >&2
-          exec "{clang_bin}" --target=aarch64-linux-gnu -x assembler "$@"
-          """
-
-          # arm32 专用 as
-          arm_wrapper = f"""#!/bin/sh
-          echo "[WRAPPER arm-as] args: $@" >&2
-          exec "{clang_bin}" --target=arm-linux-gnueabihf -x assembler "$@"
-          """
-
-          for name, content in [
-              ("as", as_wrapper),
-              ("aarch64-linux-gnu-as", aarch64_wrapper),
-              ("arm-linux-gnueabihf-as", arm_wrapper),
-          ]:
-              path = os.path.join(wrapper_dir, name)
-              with open(path, "w") as f:
-                  f.write(content)
-              os.chmod(path, 0o755)
-              print(f"Created {path}")
-          PYEOF
-
-          echo "=== Wrapper contents ==="
-          cat "$WRAPPER_DIR/as"
-          cat "$WRAPPER_DIR/aarch64-linux-gnu-as"
+          # 同样修复 VDSO
+          if grep -q "integrated-as" arch/arm64/kernel/vdso/Makefile 2>/dev/null; then
+            echo "VDSO Makefile already patched"
+          else
+            echo "" >> arch/arm64/kernel/vdso/Makefile
+            echo "# Force integrated assembler" >> arch/arm64/kernel/vdso/Makefile
+            echo "ccflags-y += -integrated-as" >> arch/arm64/kernel/vdso/Makefile
+            echo "Patched arch/arm64/kernel/vdso/Makefile"
+          fi
+          tail -5 arch/arm64/kernel/vdso/Makefile
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          WRAPPER_DIR="${{ github.workspace }}/wrapper"
-          export PATH="$WRAPPER_DIR:${{ env.CLANG_DIR }}/bin:${PATH}"
-
-          # 验证 wrapper 生效
-          which as
-          which aarch64-linux-gnu-as
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
@@ -154,7 +120,7 @@ jobs:
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS AND WARNINGS ==="
-            grep -n -E "\[WRAPPER\]|error:|Error|fatal:|failed" build.log | head -150 || true
+            grep -n -E "error:|Error|fatal:|failed" build.log | head -150 || true
             exit $BUILD_EXIT
           fi
 
