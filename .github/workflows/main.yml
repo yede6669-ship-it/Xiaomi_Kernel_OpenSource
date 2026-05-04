@@ -11,8 +11,6 @@ on:
 
 env:
   CLANG_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/clang
-  GCC64_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/gcc64
-  GCC32_DIR: /home/runner/work/Xiaomi_Kernel_OpenSource/Xiaomi_Kernel_OpenSource/toolchain/gcc32
 
 jobs:
   build:
@@ -38,8 +36,12 @@ jobs:
             liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
             libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python3 python3-pip cpio kmod
-          which make && make --version | head -1
+            python3 python3-pip cpio kmod \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
+          echo "=== Cross compiler check ==="
+          which aarch64-linux-gnu-gcc && aarch64-linux-gnu-gcc --version | head -1
+          which arm-linux-gnueabihf-gcc && arm-linux-gnueabihf-gcc --version | head -1
 
       - name: Download Clang toolchain
         run: |
@@ -50,21 +52,7 @@ jobs:
           tar -xzf clang.tar.gz -C ${{ env.CLANG_DIR }}
           rm clang.tar.gz
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
-          # 确认 ld.lld 存在
-          ls ${{ env.CLANG_DIR }}/bin/ld.lld
           ${{ env.CLANG_DIR }}/bin/ld.lld --version | head -1
-
-      - name: Download GCC toolchains
-        run: |
-          git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-            ${{ env.GCC64_DIR }}
-          git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
-            ${{ env.GCC32_DIR }}
-          # 确认 gcc 存在（不需要独立 ld）
-          ls ${{ env.GCC64_DIR }}/bin/aarch64-linux-android-gcc
-          ls ${{ env.GCC32_DIR }}/bin/arm-linux-androideabi-gcc
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -75,10 +63,11 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         run: |
-          export PATH="${{ env.CLANG_DIR }}/bin:${{ env.GCC64_DIR }}/bin:${{ env.GCC32_DIR }}/bin:${PATH}"
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
           which make && make --version | head -1
           which clang && clang --version | head -1
           which ld.lld && ld.lld --version | head -1
+          which aarch64-linux-gnu-gcc && aarch64-linux-gnu-gcc --version | head -1
 
           COMMON_FLAGS="O=out
             ARCH=arm64
@@ -86,8 +75,8 @@ jobs:
             CC=clang
             LD=ld.lld
             CLANG_TRIPLE=aarch64-linux-gnu-
-            CROSS_COMPILE=aarch64-linux-android-
-            CROSS_COMPILE_ARM32=arm-linux-androideabi-"
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf-"
 
           make $COMMON_FLAGS camellia_user_defconfig
 
