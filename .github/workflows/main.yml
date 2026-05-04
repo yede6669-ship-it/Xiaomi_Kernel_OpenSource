@@ -67,7 +67,14 @@ jobs:
           import os, stat
 
           # This wrapper sits on PATH before both /usr/bin and the system tools.
+          # Host tools (gcc compiling fixdep etc.) call 'as' with x86_64 flags like --64.
+          # Cross tools call 'as' with aarch64 flags like -EL.
+          # We detect which is needed by checking argv for aarch64-specific flags,
+          # then dispatch to the correct assembler.
           content = '''#!/bin/sh
+          # Route to the correct assembler based on target architecture flags.
+          # aarch64-linux-gnu-as uses -EL (little-endian) as a mandatory flag.
+          # x86_64 as uses --64. We detect -EL to identify cross-assembly.
           for arg in \"\$@\"; do
             case \"\$arg\" in
               -EL|-EB)
@@ -75,6 +82,7 @@ jobs:
                 ;;
             esac
           done
+          # No -EL/-EB found: host assembly, use the real x86_64 assembler
           exec /usr/bin/as \"\$@\"
           '''
 
@@ -113,7 +121,6 @@ jobs:
             HOSTCC=gcc \
             HOSTCXX=g++ \
             HOSTLD=ld \
-            HOSTAS=/usr/bin/as \
             LLVM=1 \
             LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -128,16 +135,17 @@ jobs:
 
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== ERRORS AND WARNINGS ==="
-            grep -n -E \"error:|Error|fatal:|failed\" build.log | head -150 || true
+            echo "=== 关键错误信息 (最后 200 行) ==="
+            grep -iE "error:|fatal:" build.log | head -n 100 || true
+            tail -n 200 build.log
             exit $BUILD_EXIT
           fi
 
       - name: Check build output
         if: always()
         run: |
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo \"boot dir not found\"
-          find kernel/out -name \"Image*\" 2>/dev/null || echo \"No Image files found\"
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
+          find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
 
       - name: Upload kernel image
         if: success()
