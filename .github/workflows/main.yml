@@ -61,22 +61,12 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         run: |
-          # 1. 路径拦截：创建一个临时目录存放“假”的汇编器
-          # 这是为了对付 VDSO 模块强行调用系统 /usr/bin/as 的问题
-          mkdir -p bin-garbage
-          ln -sf ${{ env.CLANG_DIR }}/bin/clang bin-garbage/as
-          ln -sf ${{ env.CLANG_DIR }}/bin/clang bin-garbage/aarch64-linux-gnu-as
-          ln -sf ${{ env.CLANG_DIR }}/bin/clang bin-garbage/arm-linux-gnueabihf-as
-          
-          # 2. 注入环境变量：将“假”汇编器目录和真正的 Clang 目录放在 PATH 最前面
-          export PATH="${{ github.workspace }}/kernel/bin-garbage:${{ env.CLANG_DIR }}/bin:${PATH}"
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          # 3. 定义编译标志
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            AS=clang \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -84,6 +74,10 @@ jobs:
             OBJDUMP=llvm-objdump \
             READELF=llvm-readelf \
             STRIP=llvm-strip \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=as \
             LLVM=1 \
             LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -91,11 +85,8 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
             DTC_EXT=dtc"
 
-          # 4. 执行配置
           make $COMMON_FLAGS camellia_defconfig
 
-          # 5. 执行编译
-          # 使用 PIPESTATUS[0] 确保即使 tee 成功，如果 make 失败也会报错
           make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
