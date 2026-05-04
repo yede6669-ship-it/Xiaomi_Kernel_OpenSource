@@ -59,40 +59,50 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Patch kernel VDSO and scripts/mod Makefiles
-        working-directory: kernel
+      - name: Create GNU assembler wrapper
         run: |
-          echo "=== arch/arm64/kernel/vdso/Makefile (before patch) ==="
-          cat arch/arm64/kernel/vdso/Makefile
+          # When clang is invoked with LLVM_IAS=1 but the .S file cannot be
+          # parsed by the integrated assembler, it falls back to calling an
+          # external "as". With our clang bin/ first on PATH, it finds whatever
+          # "as" is there — which is nothing, so it falls through to /usr/bin/as
+          # (x86_64). We fix this by placing a wrapper named
+          # "aarch64-linux-gnu-as" AND a bare "as" in the clang bin/ dir that
+          # both delegate to the real cross assembler.
+          #
+          # The kernel also invokes the assembler as "${CROSS_COMPILE}as", i.e.
+          # "aarch64-linux-gnu-as", so we need that name too.
 
-          # Patch VDSO Makefile: disable IAS for gettimeofday.S and
-          # point clang at the aarch64 cross assembler via -B
-          if ! grep -q "fno-integrated-as" arch/arm64/kernel/vdso/Makefile; then
-            printf '\n# Force external GNU assembler for VDSO assembly files\n' \
-              >> arch/arm64/kernel/vdso/Makefile
-            printf 'AFLAGS_gettimeofday.o += -fno-integrated-as -B/usr/aarch64-linux-gnu/bin\n' \
-              >> arch/arm64/kernel/vdso/Makefile
-            echo "[patch] arch/arm64/kernel/vdso/Makefile done"
-          fi
+          WRAPPER_DIR="${{ env.CLANG_DIR }}/bin"
 
-          echo "=== arch/arm64/kernel/vdso/Makefile (after patch) ==="
-          cat arch/arm64/kernel/vdso/Makefile
+          # Write the wrapper using a Python one-liner to avoid shell quoting issues
+          python3 -c "
+          import os, stat
+          content = '#!/bin/sh\nexec /usr/bin/aarch64-linux-gnu-as \"\$@\"\n'
+          for name in ['as', 'aarch64-linux-gnu-as']:
+              path = os.path.join('$WRAPPER_DIR', name)
+              if not os.path.exists(path):
+                  with open(path, 'w') as f:
+                      f.write(content)
+                  os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+                  print(f'Created wrapper: {path}')
+              else:
+                  print(f'Already exists (skipped): {path}')
+          "
 
-          # Patch scripts/mod Makefile: same issue, disable IAS there too
-          if ! grep -q "fno-integrated-as" scripts/mod/Makefile; then
-            printf '\n# Force external GNU assembler for scripts/mod\n' \
-              >> scripts/mod/Makefile
-            printf 'ccflags-y += -fno-integrated-as -B/usr/aarch64-linux-gnu/bin\n' \
-              >> scripts/mod/Makefile
-            echo "[patch] scripts/mod/Makefile done"
-          fi
+          echo "--- Wrappers in clang bin/ ---"
+          ls -la "$WRAPPER_DIR/as" "$WRAPPER_DIR/aarch64-linux-gnu-as" || true
+          echo "--- Wrapper content ---"
+          cat "$WRAPPER_DIR/as"
 
       - name: Build kernel
         working-directory: kernel
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          aarch64-linux-gnu-as --version | head -1
+          # Confirm the right assembler is on PATH
+          which as
+          which aarch64-linux-gnu-as
+          as --version | head -1
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
