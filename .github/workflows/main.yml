@@ -26,16 +26,12 @@ jobs:
           path: kernel
           fetch-depth: 1
 
-      # ── 先列出所有 defconfig，确认文件名 ─────────────────────────
       - name: List available defconfigs
         run: |
           echo "=== All arm64 defconfigs ==="
           ls kernel/arch/arm64/configs/
-          echo ""
           echo "=== Camellia related ==="
-          ls kernel/arch/arm64/configs/ | grep -i camellia || echo "None found"
-          echo "=== MTK related ==="
-          ls kernel/arch/arm64/configs/ | grep -i mtk || echo "None found"
+          ls kernel/arch/arm64/configs/ | grep -i camellia || echo "None"
 
       - name: Install build dependencies
         run: |
@@ -54,6 +50,8 @@ jobs:
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python3-pip cpio kmod
           aarch64-linux-gnu-gcc --version | head -1
+          # 确认系统 as 支持 ARM
+          aarch64-linux-gnu-as --version | head -1
 
       - name: Download Clang toolchain
         run: |
@@ -74,18 +72,22 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         run: |
-          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          # Clang 放到 PATH 末尾，避免其 as/ld 覆盖系统 binutils
+          export PATH="${PATH}:${{ env.CLANG_DIR }}/bin"
+
+          # 用绝对路径调用 clang，确保用的是对的
+          CLANG_BIN=${{ env.CLANG_DIR }}/bin/clang
+          $CLANG_BIN --version | head -1
+          which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
 
           COMMON_FLAGS="O=out
             ARCH=arm64
             SUBARCH=arm64
-            CC=clang
-            LD=ld.lld
+            CC=$CLANG_BIN
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf-"
 
-          # TODO: 根据上面 List defconfigs 步骤的输出替换这里的名字
           make $COMMON_FLAGS camellia_defconfig
 
           make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
