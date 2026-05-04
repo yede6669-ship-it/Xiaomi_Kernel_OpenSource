@@ -16,8 +16,6 @@ jobs:
   build:
     name: Build Kernel (camellia-r-oss)
     runs-on: ubuntu-22.04
-    container:
-      image: ubuntu:20.04
 
     steps:
       - name: Checkout kernel source
@@ -30,14 +28,12 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -y
-          apt-get install -y --no-install-recommends \
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabihf \
             binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabihf
-          apt-get install -y --no-install-recommends \
+            binutils-arm-linux-gnueabihf \
             make bc bison build-essential ccache curl flex \
             git gnupg gperf wget tar \
             lib32ncurses5-dev lib32readline-dev lib32z1-dev \
