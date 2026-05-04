@@ -73,23 +73,26 @@ jobs:
           which make && make --version | head -1
           which clang && clang --version | head -1
 
-          make O=out \
-            ARCH=arm64 SUBARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            LLVM=1 LLVM_IAS=1 \
-            camellia_defconfig
+          # 确认 ld.lld 存在
+          which ld.lld && ld.lld --version | head -1
 
-          make O=out \
-            ARCH=arm64 SUBARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            LLVM=1 LLVM_IAS=1 \
-            -j$(nproc --all) 2>&1 | tee build.log
+          COMMON_FLAGS="O=out
+            ARCH=arm64
+            SUBARCH=arm64
+            CC=clang
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-android-
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-"
+
+          make $COMMON_FLAGS camellia_defconfig
+
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
 
       - name: Check build output
         if: always()
