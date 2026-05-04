@@ -47,13 +47,46 @@ jobs:
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
           cd ${{ env.CLANG_DIR }}
-          # 确认有效的 antman 脚本地址
           curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
           chmod +x antman
-          # 使用 -S 获取最新版本，防止旧日期标签导致 404
           ./antman -S
-          # 直接在 Ubuntu 22.04 运行，不再需要 patch glibc
           bin/clang --version | head -1
+
+      - name: Patch system assembler for ARM
+        run: |
+          CLANG=${{ env.CLANG_DIR }}/bin/clang
+
+          # 替换系统的 aarch64-linux-gnu-as（VDSO Makefile 会直接调用这个）
+          sudo tee /usr/bin/aarch64-linux-gnu-as > /dev/null << EOF
+          #!/bin/bash
+          NEWARGS=()
+          for arg in "\$@"; do
+            case "\$arg" in
+              -EL|-EB) ;;
+              *) NEWARGS+=("\$arg") ;;
+            esac
+          done
+          exec $CLANG --target=aarch64-linux-gnu -integrated-as -c "\${NEWARGS[@]}"
+          EOF
+          sudo chmod +x /usr/bin/aarch64-linux-gnu-as
+
+          # 替换系统的 arm-linux-gnueabihf-as
+          sudo tee /usr/bin/arm-linux-gnueabihf-as > /dev/null << EOF
+          #!/bin/bash
+          NEWARGS=()
+          for arg in "\$@"; do
+            case "\$arg" in
+              -EL|-EB) ;;
+              *) NEWARGS+=("\$arg") ;;
+            esac
+          done
+          exec $CLANG --target=arm-linux-gnueabihf -integrated-as -c "\${NEWARGS[@]}"
+          EOF
+          sudo chmod +x /usr/bin/arm-linux-gnueabihf-as
+
+          echo "=== Verify wrappers ==="
+          head -3 /usr/bin/aarch64-linux-gnu-as
+          head -3 /usr/bin/arm-linux-gnueabihf-as
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -65,14 +98,12 @@ jobs:
         working-directory: kernel
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
-
           clang --version | head -1
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            AS=clang \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -84,8 +115,7 @@ jobs:
             LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
-            DTC_EXT=dtc"
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf-"
 
           make $COMMON_FLAGS camellia_defconfig
 
@@ -96,6 +126,8 @@ jobs:
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS AND WARNINGS ==="
             grep -n -E "error:|Error|fatal:|undefined" build.log | head -100 || true
+            echo "=== LAST 200 LINES ==="
+            tail -200 build.log
             exit $BUILD_EXIT
           fi
 
