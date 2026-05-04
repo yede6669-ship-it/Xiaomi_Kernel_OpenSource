@@ -58,32 +58,24 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Patch kernel to force integrated assembler for scripts/mod
+      - name: Patch kernel - exempt VDSO from LLVM IAS
         working-directory: kernel
         run: |
-          # scripts/mod/empty.o 是用来探测编译器特性的空文件
-          # 这个老内核的 Makefile 没有正确传递 LLVM_IAS，导致 clang 还是调用外部 as
-          # 直接给 scripts/mod 的编译加上 -integrated-as 强制使用 clang 内置汇编器
-          if grep -q "CFLAGS_REMOVE" scripts/mod/Makefile 2>/dev/null; then
-            echo "Makefile already patched"
-          else
-            echo "" >> scripts/mod/Makefile
-            echo "# Force integrated assembler to avoid external 'as' for cross-compilation" >> scripts/mod/Makefile
-            echo "ccflags-y += -integrated-as" >> scripts/mod/Makefile
-            echo "Patched scripts/mod/Makefile"
-          fi
-          tail -5 scripts/mod/Makefile
+          echo "=== arch/arm64/kernel/vdso/Makefile (before patch) ==="
+          cat arch/arm64/kernel/vdso/Makefile
 
-          # 同样修复 VDSO
-          if grep -q "integrated-as" arch/arm64/kernel/vdso/Makefile 2>/dev/null; then
-            echo "VDSO Makefile already patched"
-          else
-            echo "" >> arch/arm64/kernel/vdso/Makefile
-            echo "# Force integrated assembler" >> arch/arm64/kernel/vdso/Makefile
-            echo "ccflags-y += -integrated-as" >> arch/arm64/kernel/vdso/Makefile
-            echo "Patched arch/arm64/kernel/vdso/Makefile"
+          # The old MTK gettimeofday.S uses GNU assembler macro syntax that
+          # LLVM's integrated assembler (IAS) cannot parse. We must force the
+          # VDSO subdirectory to use the external GNU assembler (aarch64-linux-gnu-as)
+          # by overriding LLVM_IAS to 0 for this directory only.
+          if ! grep -q "LLVM_IAS.*0" arch/arm64/kernel/vdso/Makefile; then
+            # Insert the override at the top of the Makefile (after any initial comments)
+            sed -i '1s|^|# Override: use GNU assembler for VDSO (IAS cannot parse old MTK .S syntax)\nLLVM_IAS := 0\nKBUILD_AFLAGS += --target=aarch64-linux-gnu\n\n|' arch/arm64/kernel/vdso/Makefile
+            echo "[patch] VDSO Makefile patched to disable IAS"
           fi
-          tail -5 arch/arm64/kernel/vdso/Makefile
+
+          echo "=== arch/arm64/kernel/vdso/Makefile (after patch) ==="
+          cat arch/arm64/kernel/vdso/Makefile
 
       - name: Build kernel
         working-directory: kernel
