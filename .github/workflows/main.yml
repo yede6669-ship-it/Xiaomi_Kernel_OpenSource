@@ -61,7 +61,26 @@ jobs:
       - name: Build kernel
         working-directory: kernel
         run: |
-          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          # 创建 wrapper 目录，只拦截 aarch64/arm 的 as，host 的 as 不动
+          mkdir -p ${{ github.workspace }}/wrapper
+
+          # aarch64-linux-gnu-as wrapper：转发给 clang 内置汇编器
+          cat > ${{ github.workspace }}/wrapper/aarch64-linux-gnu-as << 'EOF'
+          #!/bin/sh
+          exec "${{ env.CLANG_DIR }}/bin/clang" --target=aarch64-linux-gnu -c "$@"
+          EOF
+
+          # arm-linux-gnueabihf-as wrapper
+          cat > ${{ github.workspace }}/wrapper/arm-linux-gnueabihf-as << 'EOF'
+          #!/bin/sh
+          exec "${{ env.CLANG_DIR }}/bin/clang" --target=arm-linux-gnueabihf -c "$@"
+          EOF
+
+          chmod +x ${{ github.workspace }}/wrapper/aarch64-linux-gnu-as
+          chmod +x ${{ github.workspace }}/wrapper/arm-linux-gnueabihf-as
+
+          # PATH 中 wrapper 在前，但不放裸 as，保留系统 as 给 host 用
+          export PATH="${{ github.workspace }}/wrapper:${{ env.CLANG_DIR }}/bin:${PATH}"
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
@@ -77,7 +96,7 @@ jobs:
             HOSTCC=gcc \
             HOSTCXX=g++ \
             HOSTLD=ld \
-            HOSTAS=as \
+            HOSTAS=/usr/bin/as \
             LLVM=1 \
             LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
