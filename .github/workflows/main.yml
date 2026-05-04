@@ -72,6 +72,7 @@ jobs:
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
+            AS=clang \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
