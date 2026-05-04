@@ -50,6 +50,9 @@ jobs:
           tar -xzf clang.tar.gz -C ${{ env.CLANG_DIR }}
           rm clang.tar.gz
           ${{ env.CLANG_DIR }}/bin/clang --version | head -1
+          # 确认 ld.lld 存在
+          ls ${{ env.CLANG_DIR }}/bin/ld.lld
+          ${{ env.CLANG_DIR }}/bin/ld.lld --version | head -1
 
       - name: Download GCC toolchains
         run: |
@@ -59,14 +62,9 @@ jobs:
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             ${{ env.GCC32_DIR }}
-
-      - name: List available defconfigs
-        run: |
-          echo "=== Available defconfigs for arm64 ==="
-          ls kernel/arch/arm64/configs/ | grep -i camellia || echo "No camellia defconfig found"
-          ls kernel/arch/arm64/configs/ | grep -i mtk || echo "No mtk defconfig found"
-          echo "=== All arm64 defconfigs ==="
-          ls kernel/arch/arm64/configs/
+          # 确认 gcc 存在（不需要独立 ld）
+          ls ${{ env.GCC64_DIR }}/bin/aarch64-linux-android-gcc
+          ls ${{ env.GCC32_DIR }}/bin/arm-linux-androideabi-gcc
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -80,27 +78,26 @@ jobs:
           export PATH="${{ env.CLANG_DIR }}/bin:${{ env.GCC64_DIR }}/bin:${{ env.GCC32_DIR }}/bin:${PATH}"
           which make && make --version | head -1
           which clang && clang --version | head -1
+          which ld.lld && ld.lld --version | head -1
 
           COMMON_FLAGS="O=out
             ARCH=arm64
             SUBARCH=arm64
             CC=clang
+            LD=ld.lld
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-"
 
-          # 使用 camellia_user_defconfig
           make $COMMON_FLAGS camellia_user_defconfig
 
           make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
           echo "=== Build exit code: $BUILD_EXIT ==="
-
-          # 失败时打印最后 100 行错误
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== LAST 100 LINES OF BUILD LOG ==="
-            tail -100 build.log
+            echo "=== LAST 150 LINES OF BUILD LOG ==="
+            tail -150 build.log
             exit $BUILD_EXIT
           fi
 
@@ -111,7 +108,6 @@ jobs:
           ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
           echo "=== Search for any Image files ==="
           find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
-          find kernel/out -name "*.img" 2>/dev/null || echo "No .img files found"
 
       - name: Upload kernel image
         if: success()
