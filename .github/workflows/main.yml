@@ -59,58 +59,43 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Create GNU assembler wrapper
+      - name: Hijack system assembler (狸猫换太子)
         run: |
-          WRAPPER_DIR="${{ env.CLANG_DIR }}/bin"
-
-          python3 -c "
-          import os, stat
-
-          # This wrapper sits on PATH before both /usr/bin and the system tools.
-          # Host tools (gcc compiling fixdep etc.) call 'as' with x86_64 flags like --64.
-          # Cross tools call 'as' with aarch64 flags like -EL.
-          # We detect which is needed by checking argv for aarch64-specific flags,
-          # then dispatch to the correct assembler.
-          content = '''#!/bin/sh
-          # Route to the correct assembler based on target architecture flags.
-          # aarch64-linux-gnu-as uses -EL (little-endian) as a mandatory flag.
-          # x86_64 as uses --64. We detect -EL to identify cross-assembly.
-          for arg in \"\$@\"; do
-            case \"\$arg\" in
-              -EL|-EB)
-                exec /usr/bin/aarch64-linux-gnu-as \"\$@\"
+          # 1. 把系统原本的汇编器重命名备份
+          sudo mv /usr/bin/as /usr/bin/as.orig
+          
+          # 2. 写一个“交通警察”脚本放到原本的位置
+          cat << 'EOF' | sudo tee /usr/bin/as > /dev/null
+          #!/bin/sh
+          for arg in "$@"; do
+            case "$arg" in
+              # 如果发现手机专用的 ARM64 指令
+              -EL|-EB|-mabi=*)
+                exec /usr/bin/aarch64-linux-gnu-as "$@"
                 ;;
             esac
           done
-          # No -EL/-EB found: host assembly, use the real x86_64 assembler
-          exec /usr/bin/as \"\$@\"
-          '''
-
-          for name in ['as', 'aarch64-linux-gnu-as']:
-              path = os.path.join('$WRAPPER_DIR', name)
-              with open(path, 'w') as f:
-                  f.write(content)
-              os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-              print(f'Created wrapper: {path}')
-          "
-
-          echo "--- Wrapper content ---"
-          cat "${{ env.CLANG_DIR }}/bin/as"
+          # 否则，交还原来的系统汇编器处理
+          exec /usr/bin/as.orig "$@"
+          EOF
+          
+          # 3. 赋予执行权限
+          sudo chmod +x /usr/bin/as
+          
+          echo "--- 检查伪装的汇编器 ---"
+          cat /usr/bin/as
 
       - name: Build kernel
         working-directory: kernel
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          # Confirm the right assembler is on PATH
-          which as
-          which aarch64-linux-gnu-as
-          as --version | head -1
-
+          # 明确告诉内核各个工具的具体身份
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
+            AS=aarch64-linux-gnu-as \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
