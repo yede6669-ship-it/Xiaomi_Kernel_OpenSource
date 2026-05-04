@@ -58,22 +58,23 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Kernel Source Patching
+      - name: Patch Kernel Source
         working-directory: kernel
         run: |
-          # 1. 物理移除所有 -Werror 标志，防止警告转错误
+          # 1. 物理移除所有 -Werror，防止警告变错误
           find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g'
           
-          # 2. 绕过强制的堆栈保护检查（解决 CONFIG_CC_STACKPROTECTOR_STRONG 报错）
-          # 直接在 Makefile 里把报错退出改为警告打印
-          sed -i 's/$(error Cannot use CONFIG_CC_STACKPROTECTOR_STRONG.*/$(warning Skipping Stack Protector Check)/' Makefile
+          # 2. 暴力屏蔽堆栈保护检查，防止它因为检测不到编译器能力而报错
+          sed -i 's/$(error Cannot use CONFIG_CC_STACKPROTECTOR_STRONG.*/$(warning Skipping...)/' Makefile
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          # 修复了之前的语法错误：${{ env.CLANG_DIR }} 现在正确闭合
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
           
+          # 核心参数：
+          # LLVM_IAS=0：使用传统汇编器，解决 "broken .inst" 错误
+          # CONFIG_CC_STACKPROTECTOR_STRONG=n：直接在命令行关闭报错的功能
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
@@ -91,7 +92,8 @@ jobs:
             HOSTCC=gcc \
             HOSTCXX=g++ \
             LLVM=1 \
-            LLVM_IAS=0"
+            LLVM_IAS=0 \
+            CONFIG_CC_STACKPROTECTOR_STRONG=n"
 
           # 1. 生成配置
           make $COMMON_FLAGS camellia_defconfig
@@ -109,7 +111,7 @@ jobs:
       - name: Check build output
         if: always()
         run: |
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "No output found"
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "Build log check needed"
 
       - name: Upload kernel image
         if: success()
@@ -127,6 +129,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: full-log
           path: kernel/build.log
-          retention-days: 3
