@@ -128,15 +128,23 @@ jobs:
           echo ">>> 确认 as 指向包装器"
           which as && as --version | head -1
 
-          echo ">>> 生成 defconfig (verbose)"
-          make $COMMON_FLAGS camellia_defconfig V=1 < /dev/null 2>&1 | tee /tmp/defconfig.log
-          DEFCONFIG_EXIT=${PIPESTATUS[0]}
-          echo "=== defconfig exit: $DEFCONFIG_EXIT ==="
-          if [ $DEFCONFIG_EXIT -ne 0 ]; then
-            echo "=== 最后50行 ==="
-            tail -50 /tmp/defconfig.log
-            exit $DEFCONFIG_EXIT
+          echo ">>> 先单独编译 kconfig 工具"
+          make $COMMON_FLAGS scripts/kconfig/conf 2>&1 &
+          KCONFIG_PID=$!
+          sleep 30
+          if kill -0 $KCONFIG_PID 2>/dev/null; then
+            echo "!!! kconfig 编译 30 秒后仍未完成，打印进程树 !!!"
+            ps auxf || true
+            ls -la out/scripts/kconfig/ 2>/dev/null || true
+            kill $KCONFIG_PID || true
+            exit 1
           fi
+          wait $KCONFIG_PID
+          echo ">>> kconfig 编译完成"
+
+          echo ">>> 生成 defconfig"
+          make $COMMON_FLAGS camellia_defconfig < /dev/null 2>&1
+          echo ">>> defconfig 完成"
 
           echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
