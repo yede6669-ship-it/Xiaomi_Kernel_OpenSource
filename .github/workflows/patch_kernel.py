@@ -36,3 +36,17 @@ for path in makefiles:
     except Exception as e:
         print('skip ' + path + ': ' + str(e))
 print(str(changed) + ' file(s) modified')
+
+# 额外直接修复 xiaomi_touch.c
+touch_path = 'drivers/input/touchscreen/mediatek/xiaomi/xiaomi_touch.c'
+try:
+    with open(touch_path, 'r', errors='replace') as f:
+        src = f.read()
+    # 把无参数函数声明补上 void
+    import re
+    src = re.sub(r'(\w+\s+\w+)\(\)', r'\1(void)', src)
+    with open(touch_path, 'w') as f:
+        f.write(src)
+    print('patched ' + touch_path)
+except Exception as e:
+    print('skip ' + touch_path + ': ' + str(e))
