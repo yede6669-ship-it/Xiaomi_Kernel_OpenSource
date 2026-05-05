@@ -124,26 +124,31 @@ try:
 except Exception as e:
     print('skip ' + cust_dtsi_path + ': ' + str(e))
 
-# ── Fix: mtk-cmdq-helper.c ERR_PTR 误入 s32 函数，还原为 PTR_ERR ─────────────
+# ── Fix: mtk-cmdq-helper.c 指针返回函数里 return -ENOMEM → ERR_PTR ──────────
 cmdq_path = 'drivers/soc/mediatek/mtk-cmdq-helper.c'
 try:
     with open(cmdq_path, 'r', errors='replace') as f:
-        src = f.read()
-    # 上次的正则把 s32 函数里的 return -ENOMEM 改成了 ERR_PTR，需要还原
-    # 同时把 void* 函数里合法的 ERR_PTR 保留
-    # 策略：扫描每个函数，根据返回类型决定怎么处理
-    # 简单精确替换：1738行和1919行附近是 s32 函数里多出的 ERR_PTR
-    new_src = re.sub(
-        r'\breturn\s+ERR_PTR\((-ENOMEM)\)\s*;',
-        r'return \1;',
-        src
-    )
-    if new_src != src:
+        lines = f.readlines()
+
+    # 这些行是指针返回类型函数里的裸 return -ENOMEM，需要改成 ERR_PTR
+    target_lines = {174, 190, 384, 410, 507, 598, 1491}
+    changed_cmdq = False
+    new_lines = []
+    for i, line in enumerate(lines):
+        lineno = i + 1
+        if lineno in target_lines and re.search(r'return\s+-ENOMEM\s*;', line):
+            new_line = re.sub(r'return\s+-ENOMEM\s*;', 'return ERR_PTR(-ENOMEM);', line)
+            print('patched ' + cmdq_path + ' line ' + str(lineno))
+            new_lines.append(new_line)
+            changed_cmdq = True
+        else:
+            new_lines.append(line)
+
+    if changed_cmdq:
         with open(cmdq_path, 'w') as f:
-            f.write(new_src)
-        print('patched ' + cmdq_path)
+            f.writelines(new_lines)
     else:
-        print('skip ' + cmdq_path + ': pattern not found')
+        print('skip ' + cmdq_path + ': no target lines matched')
 except Exception as e:
     print('skip ' + cmdq_path + ': ' + str(e))
 
