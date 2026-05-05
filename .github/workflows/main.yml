@@ -18,6 +18,11 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+        with:
+          path: scripts_repo
+
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -60,82 +65,14 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Write patch scripts
-        run: |
-          cat > /tmp/patch_kernel.py << 'ENDOFSCRIPT'
-import re, os
-
-def safe_remove_werror(text):
-    lines = text.split('\n')
-    result = []
-    for line in lines:
-        tokens = line.split(' ')
-        new_tokens = []
-        for token in tokens:
-            if '$(' in token:
-                new_tokens.append(token)
-            elif re.match(r'^-Werror(=[^\s]*)?$', token):
-                pass
-            else:
-                new_tokens.append(token)
-        result.append(' '.join(new_tokens))
-    return '\n'.join(result)
-
-makefiles = []
-for root, dirs, files in os.walk('.'):
-    dirs[:] = [d for d in dirs if d != '.git']
-    for fname in files:
-        if fname in ('Makefile', 'Kbuild') or fname.endswith('.mk'):
-            makefiles.append(os.path.join(root, fname))
-
-changed = 0
-for path in makefiles:
-    try:
-        with open(path, 'r', errors='replace') as f:
-            original = f.read()
-        new = safe_remove_werror(original)
-        if new != original:
-            with open(path, 'w') as f:
-                f.write(new)
-            changed += 1
-    except Exception as e:
-        print('skip ' + path + ': ' + str(e))
-print(str(changed) + ' file(s) modified')
-ENDOFSCRIPT
-
-          cat > /tmp/patch_stackprotector.py << 'ENDOFSCRIPT'
-with open('Makefile', 'r') as f:
-    lines = f.readlines()
-out = []
-i = 0
-while i < len(lines):
-    line = lines[i]
-    if 'Cannot use CONFIG_CC_STACKPROTECTOR' in line and 'exit 1' in line:
-        out.append('# PATCHED: ' + line)
-    elif 'Cannot use CONFIG_CC_STACKPROTECTOR' in line:
-        out.append('# PATCHED: ' + line)
-        if i + 1 < len(lines) and 'exit 1' in lines[i + 1]:
-            i += 1
-            out.append('# PATCHED: ' + lines[i])
-    else:
-        out.append(line)
-    i += 1
-with open('Makefile', 'w') as f:
-    f.writelines(out)
-patched = [l for l in out if 'PATCHED' in l]
-print(str(len(patched)) + ' line(s) patched')
-for l in patched:
-    print(l.rstrip())
-ENDOFSCRIPT
-
       - name: Patch kernel source
         working-directory: kernel
         run: |
           echo ">>> [1] 安全删除 -Werror 系列标志"
-          python3 /tmp/patch_kernel.py
+          python3 ${{ github.workspace }}/scripts_repo/.github/scripts/patch_kernel.py
 
           echo ">>> [2] 注释掉 stackprotector exit 1"
-          python3 /tmp/patch_stackprotector.py
+          python3 ${{ github.workspace }}/scripts_repo/.github/scripts/patch_stackprotector.py
 
       - name: Generate defconfig and fix .config
         working-directory: kernel
