@@ -49,7 +49,15 @@ jobs:
           aarch64-linux-gnu-gcc --version | head -1
           aarch64-linux-gnu-as --version | head -1
 
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CLANG_DIR }}
+          key: clang-neutron-${{ runner.os }}-v1
+
       - name: Download Clang toolchain via AntMan
+        if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
           cd ${{ env.CLANG_DIR }}
@@ -59,12 +67,10 @@ jobs:
           chmod +x bin/*
           bin/clang --version | head -1
 
-      - name: Clear ccache
+      - name: Verify Clang toolchain
         run: |
-          sudo apt-get install -y ccache
-          ccache -C
-          ccache -z
-          echo "ccache cleared"
+          chmod +x ${{ env.CLANG_DIR }}/bin/*
+          ${{ env.CLANG_DIR }}/bin/clang --version | head -1
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
