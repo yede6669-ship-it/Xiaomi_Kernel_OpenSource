@@ -95,7 +95,6 @@ jobs:
             HOSTCXX=g++ \
             HOSTLD=ld \
             HOSTAS=/usr/bin/as \
-            LLVM=1 \
             LLVM_IAS=0 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -122,9 +121,10 @@ jobs:
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          echo ">>> 验证汇编器"
-          which aarch64-linux-gnu-as
-          aarch64-linux-gnu-as --version | head -1
+          echo ">>> 验证工具链"
+          which clang && clang --version | head -1
+          which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
+          which ld.lld && ld.lld --version | head -1
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
@@ -142,7 +142,6 @@ jobs:
             HOSTCXX=g++ \
             HOSTLD=ld \
             HOSTAS=/usr/bin/as \
-            LLVM=1 \
             LLVM_IAS=0 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
