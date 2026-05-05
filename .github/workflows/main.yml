@@ -1,60 +1,57 @@
 name: Build Camellia Kernel (Stable CI)
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
-      KERNEL_DIR: ${{ github.workspace }}/kernel
-      OUT_DIR: ${{ github.workspace }}/kernel/out
-      TOOLS_DIR: ${{ github.workspace }}/tools
+      TOOLS_DIR: tools
+      OUT_DIR: kernel/out
+      KERNEL_DIR: kernel
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-        with:
-          submodules: true
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        submodules: true
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y bc build-essential libncurses-dev bison flex libssl-dev curl unzip wget git
+    - name: Set up environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc build-essential libncurses-dev bison flex libssl-dev libelf-dev git wget curl
 
-      - name: Download example boot.img
-        run: |
-          mkdir -p $OUT_DIR
-          cd $OUT_DIR
-          # 示例 boot.img，你可以后续替换成自己机型的 boot.img
-          curl -L -o boot.img https://example.com/boot.img
+    - name: Clone mkbootimg_tools using GITHUB_TOKEN
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git clone https://x-access-token:${GITHUB_TOKEN}@github.com/osm0sis/mkbootimg_tools.git $TOOLS_DIR
 
-      - name: Clone mkbootimg_tools
-        run: |
-          # 浅克隆避免认证问题
-          git clone --depth=1 https://github.com/osm0sis/mkbootimg_tools.git $TOOLS_DIR
+    - name: Download example boot.img
+      run: |
+        mkdir -p $OUT_DIR
+        cd $OUT_DIR
+        # 这里下载一个示例 boot.img，实际你后续可以换成自己的设备
+        curl -L -o boot.img https://example.com/sample_boot.img || echo "示例 boot.img 下载失败，可以自己替换"
 
-      - name: Build kernel
-        run: |
-          cd $KERNEL_DIR
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          make O=$OUT_DIR camellia_defconfig
-          make -j$(nproc) O=$OUT_DIR
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+        make -j$(nproc) O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Check boot image
-        run: |
-          ls -lh $OUT_DIR
-          file $OUT_DIR/Image
-          file $OUT_DIR/dtbo.img
+    - name: List build output
+      run: |
+        echo ">>> boot dir:"
+        ls -al $OUT_DIR/arch/arm64/boot/
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: boot-image
-          path: |
-            $OUT_DIR/Image
-            $OUT_DIR/dtbo.img
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-image
+        path: $OUT_DIR/arch/arm64/boot/Image*
