@@ -96,6 +96,9 @@ jobs:
           echo ">>> [2] 注释掉 stackprotector exit 1"
           python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_stackprotector.py
 
+          echo ">>> [3] 修复 cfi.c 指针转换"
+          python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_cfi.py
+
       - name: Generate defconfig and fix .config
         working-directory: kernel
         timeout-minutes: 10
