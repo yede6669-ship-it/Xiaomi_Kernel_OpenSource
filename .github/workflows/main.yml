@@ -98,6 +98,7 @@ jobs:
 
       - name: Generate defconfig and fix .config
         working-directory: kernel
+        timeout-minutes: 10
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
@@ -127,8 +128,15 @@ jobs:
           echo ">>> 确认 as 指向包装器"
           which as && as --version | head -1
 
-          echo ">>> 生成 defconfig"
-          make $COMMON_FLAGS camellia_defconfig < /dev/null
+          echo ">>> 生成 defconfig (verbose)"
+          make $COMMON_FLAGS camellia_defconfig V=1 < /dev/null 2>&1 | tee /tmp/defconfig.log
+          DEFCONFIG_EXIT=${PIPESTATUS[0]}
+          echo "=== defconfig exit: $DEFCONFIG_EXIT ==="
+          if [ $DEFCONFIG_EXIT -ne 0 ]; then
+            echo "=== 最后50行 ==="
+            tail -50 /tmp/defconfig.log
+            exit $DEFCONFIG_EXIT
+          fi
 
           echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
@@ -136,7 +144,7 @@ jobs:
           sed -i '/^CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
           echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
 
-          echo ">>> olddefconfig 使配置正式生效"
+          echo ">>> olddefconfig"
           make $COMMON_FLAGS olddefconfig < /dev/null
 
           grep "STACKPROTECTOR" out/.config || true
