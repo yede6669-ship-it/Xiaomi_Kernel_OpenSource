@@ -42,6 +42,7 @@ jobs:
             python3 python3-pip cpio kmod ca-certificates \
             zstd patchelf device-tree-compiler
           aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-as --version | head -1
 
       - name: Download Clang toolchain via AntMan
         run: |
@@ -51,6 +52,7 @@ jobs:
           chmod +x antman
           ./antman -S
           chmod +x bin/*
+          bin/clang --version | head -1
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -58,26 +60,77 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
-      - name: Patch Kernel Makefile and Build
+      - name: Create GNU assembler smart wrapper
+        run: |
+          # 创建一个智能 as 包装器放在 clang/bin/ 最前面
+          # 检测到 -EL/-EB（aarch64 特有标志）时走交叉汇编器
+          # 否则走宿主机 x86_64 汇编器，避免 fixdep 等 host 工具出错
+          python3 -c "
+          import os, stat
+          wrapper = '#!/bin/sh\nfor arg in \"\$@\"; do\n  case \"\$arg\" in\n    -EL|-EB)\n      exec /usr/bin/aarch64-linux-gnu-as \"\$@\"\n      ;;\n  esac\ndone\nexec /usr/bin/as \"\$@\"\n'
+          d = '${{ env.CLANG_DIR }}/bin'
+          for name in ['as', 'aarch64-linux-gnu-as']:
+              p = os.path.join(d, name)
+              open(p, 'w').write(wrapper)
+              os.chmod(p, 0o755)
+              print('created:', p)
+          "
+          echo "=== wrapper content ==="
+          cat ${{ env.CLANG_DIR }}/bin/as
+
+      - name: Patch kernel source
         working-directory: kernel
         run: |
-          # 1. 物理移除所有 -Werror，防止警告变错误
-          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g'
-          
-          # 2. 暴力通过编译器检查
-          sed -i 's/$(error Cannot use CONFIG_CC_STACKPROTECTOR_STRONG.*/$(warning Skipping...)/' Makefile
-          
-          # 3. 严格配置 PATH
+          echo ">>> [1] 删除所有 -Werror，防止警告变错误"
+          find . \( -name "Makefile" -o -name "Kbuild" \) | \
+            xargs sed -i 's/-Werror\b//g'
+
+          echo ">>> [2] 修复 prepare-compiler-check：跳过 stackprotector 编译器能力检查"
+          # 这个检查在用 clang 交叉编译时会误判为不支持，直接将整个检查块替换成空操作
+          # 匹配的模式：ifeq ($(call cc-option, $(stackp-flag)),)
+          # 将它和后面的 @echo ... && exit 1 一起注释掉
+          python3 - <<'PYEOF'
+          import re
+
+          with open('Makefile', 'r') as f:
+              content = f.read()
+
+          # 找到 prepare-compiler-check 目标里检查 stackp-flag 的块并注释掉
+          # 原始内容类似：
+          #   ifeq ($(call cc-option, $(stackp-flag)),)
+          #       @echo Cannot use ... && exit 1
+          #   endif
+          pattern = r'(ifdef stackp-name.*?ifeq \(\$\(call cc-option.*?stackp-flag.*?\),\).*?exit 1.*?endif)'
+          replacement = lambda m: '\n'.join('# ' + line for line in m.group(0).split('\n'))
+          new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+          if new_content == content:
+              print('WARNING: stackp-flag pattern not matched, trying simpler approach')
+              # 备用方案：直接注释含 stackp-flag 的 exit 1 行
+              new_content = re.sub(
+                  r'(@echo Cannot use CONFIG_CC_STACKPROTECTOR.*?exit 1)',
+                  r'# \1',
+                  content,
+                  flags=re.DOTALL
+              )
+
+          with open('Makefile', 'w') as f:
+              f.write(new_content)
+          print('Makefile patched OK')
+          PYEOF
+
+          echo ">>> [3] 验证 patch 结果"
+          grep -n "stackp-flag\|prepare-compiler-check\|Cannot use CONFIG_CC_STACKPROTECTOR" Makefile | head -20 || true
+
+      - name: Generate defconfig and fix stackprotector in .config
+        working-directory: kernel
+        run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
-          
-          # 4. 编译参数
+
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -87,47 +140,97 @@ jobs:
             STRIP=llvm-strip \
             HOSTCC=gcc \
             HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=/usr/bin/as \
             LLVM=1 \
-            LLVM_IAS=0"
-          
-          # 5. 生成默认配置
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc"
+
+          echo ">>> 生成 defconfig"
           make $COMMON_FLAGS camellia_defconfig
-          
-          # 6. 【核心修复】手动在生成的 .config 中禁用堆栈保护
+
+          echo ">>> 修改 .config：把 STACKPROTECTOR_STRONG 改成 NONE"
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_REGULAR=y/# CONFIG_CC_STACKPROTECTOR_REGULAR is not set/' out/.config
+          sed -i '/CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
           echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
-          
-          # 7. 正式编译
-          make $COMMON_FLAGS CONFIG_CC_STACKPROTECTOR_STRONG=n -j$(nproc --all) 2>&1 | tee build.log
-          
+
+          echo ">>> 用 olddefconfig 使配置生效"
+          make $COMMON_FLAGS olddefconfig
+
+          echo ">>> 确认最终配置"
+          grep "STACKPROTECTOR" out/.config || true
+
+          echo "COMMON_FLAGS_EXPORT=$COMMON_FLAGS" >> $GITHUB_ENV
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+
+          # 确认汇编器路由正确
+          which as && as --version | head -1
+          which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
+
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=/usr/bin/as \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc"
+
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
+
+          echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== Build failed with exit code $BUILD_EXIT ==="
-            grep -iE "error:|fatal:" build.log | tail -n 20 || true
+            echo "=== ERRORS ==="
+            grep -n -E "error:|Error|fatal:" build.log | head -80 || true
             exit $BUILD_EXIT
           fi
 
       - name: Check build output
         if: always()
         run: |
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "Build did not produce boot files"
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
+          find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
 
       - name: Upload kernel image
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: camellia-kernel-final
+          name: camellia-kernel-${{ github.run_number }}
           path: |
             kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel/out/arch/arm64/boot/Image.gz
             kernel/out/arch/arm64/boot/Image
             kernel/out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ github.run_number }}
           path: kernel/build.log
+          if-no-files-found: ignore
           retention-days: 3
