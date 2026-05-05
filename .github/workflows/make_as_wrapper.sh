@@ -19,7 +19,7 @@ EOF
 chmod +x "$WRAPPER"
 cp "$WRAPPER" "$1/aarch64-linux-gnu-as"
 
-# 把系统原版 as 备份为 as.real，再覆盖
+# 备份系统原版 as
 sudo cp /usr/bin/as /usr/bin/as.real
 sudo cp "$WRAPPER" /usr/bin/as
 sudo cp "$WRAPPER" /usr/bin/aarch64-linux-gnu-as
@@ -27,7 +27,7 @@ sudo cp "$WRAPPER" /usr/bin/aarch64-linux-gnu-as
 echo "=== wrapper content ==="
 cat "$WRAPPER"
 echo "=== wrapper test (aarch64 path) ==="
-"$WRAPPER" -EL --version | head -1
+/usr/bin/aarch64-linux-gnu-as --version | head -1
 echo "=== wrapper test (host path) ==="
 /usr/bin/as.real --version | head -1
 echo "=== done ==="
