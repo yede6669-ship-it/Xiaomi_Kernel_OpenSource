@@ -1,115 +1,71 @@
-name: Build Camellia Kernel + Boot.img
+name: Build Xiaomi Kernel
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+      KERNEL_DEFCONFIG: camellia_defconfig   # 改成你的机型对应的 defconfig
 
     steps:
-      # 1️⃣ 拉 kernel
-      - name: Checkout kernel
-        uses: actions/checkout@v4
-        with:
-          repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: camellia-r-oss
-          path: kernel
+    - name: Checkout source
+      uses: actions/checkout@v3
+      with:
+        submodules: true
 
-      # 2️⃣ 修 apt + 安装依赖
-      - name: Install dependencies
-        run: |
-          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
-          sudo apt-get clean
-          sudo apt-get -o Acquire::ForceIPv4=true update -y
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y git curl unzip bc build-essential flex bison libssl-dev libncurses5-dev
 
-          sudo apt-get install -y \
-            bc bison flex build-essential curl git \
-            libssl-dev libncurses5-dev \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabihf \
-            device-tree-compiler \
-            cpio unzip
+    - name: Download mkbootimg tools
+      run: |
+        mkdir -p tools
+        curl -L -o tools/mkbootimg_tools.zip https://github.com/osm0sis/mkbootimg_tools/archive/refs/heads/master.zip
+        unzip tools/mkbootimg_tools.zip -d tools
+        mv tools/mkbootimg_tools-master/* tools/
+        chmod +x tools/*.sh
 
-      # 3️⃣ clang
-      - name: Download clang
-        run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+    - name: Setup kernel defconfig
+      run: |
+        make O=out $KERNEL_DEFCONFIG
 
-      - name: Setup env
-        run: |
-          echo "CLANG_PATH=$(pwd)/clang/bin" >> $GITHUB_ENV
+    - name: Build Kernel
+      run: |
+        # 屏蔽 warnings 导致的编译失败
+        make -j$(nproc) O=out KCFLAGS="-Wno-error" 2>&1 | tee build.log
 
-      # 4️⃣ 编译 kernel（修 Werror）
-      - name: Build kernel
-        working-directory: kernel
-        run: |
-          export PATH=$CLANG_PATH:$PATH
+    - name: Check boot image
+      run: |
+        echo ">>> boot dir:"
+        ls -al out/arch/arm64/boot/
 
-          export ARCH=arm64
-          export SUBARCH=arm64
+    - name: Pack boot.img
+      run: |
+        # 下载示例 boot.img (你自己的机型换成真实 boot.img)
+        curl -L -o boot.img https://example.com/your_boot.img
+        # 使用 mkbootimg 工具重新打包
+        tools/unpackbootimg.sh boot.img -o out/
+        tools/mkbootimg.sh --kernel out/arch/arm64/boot/Image \
+          --ramdisk out/ramdisk.gz \
+          --cmdline "console=ttyS0,115200n8" \
+          --output out/boot-new.img
 
-          export CC=clang
-          export LD=ld.lld
-          export LLVM=1
-          export LLVM_IAS=0
+    - name: Upload boot.img artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-new.img
+        path: out/boot-new.img
 
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
-
-          mkdir -p out
-
-          make O=out camellia_defconfig
-
-          make -j$(nproc) \
-            O=out \
-            KCFLAGS=-Wno-error \
-            2>&1 | tee build.log
-
-      # 5️⃣ 下载 stock boot.img（你必须换成自己的！）
-      - name: Download stock boot
-        run: |
-          echo ">>> 下载示例 boot.img（你应该换成自己机型）"
-          curl -L -o boot.img https://github.com/topjohnwu/magisk-files/raw/master/boot.img
-
-      # 6️⃣ 解包 boot.img
-      - name: Unpack boot
-        run: |
-          git clone https://github.com/osm0sis/mkbootimg_tools tools
-          cd tools
-
-          chmod +x unpackbootimg.sh
-          ./unpackbootimg.sh ../boot.img
-
-      # 7️⃣ 替换 kernel
-      - name: Replace kernel
-        run: |
-          cp kernel/out/arch/arm64/boot/Image.gz-dtb tools/zImage
-
-      # 8️⃣ 重新打包 boot.img
-      - name: Repack boot
-        run: |
-          cd tools
-
-          chmod +x mkbootimg.sh
-
-          ./mkbootimg.sh \
-            --kernel zImage \
-            --ramdisk ramdisk.cpio.gz \
-            --cmdline "$(cat boot.img-cmdline)" \
-            --base $(cat boot.img-base) \
-            --pagesize $(cat boot.img-pagesize) \
-            --output new-boot.img
-
-          mv new-boot.img ../boot-new.img
-
-      # 9️⃣ 上传
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: camellia-kernel
-          path: |
-            kernel/out/arch/arm64/boot/Image*
-            kernel/out/arch/arm64/boot/dtbo.img
-            boot-new.img
-            kernel/build.log
+    - name: Upload build log
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build.log
