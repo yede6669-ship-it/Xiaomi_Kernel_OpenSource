@@ -11,23 +11,23 @@ for arg in "$@"; do
 done
 
 if [ "$IS_AARCH64" = "1" ]; then
-  exec /usr/bin/aarch64-linux-gnu-as "$@"
+  exec /usr/bin/aarch64-linux-gnu-as.real "$@"
 else
   exec /usr/bin/as.real "$@"
 fi
 EOF
 chmod +x "$WRAPPER"
-cp "$WRAPPER" "$1/aarch64-linux-gnu-as"
 
-# 备份系统原版 as
+# 备份真正的汇编器，再覆盖
 sudo cp /usr/bin/as /usr/bin/as.real
+sudo cp /usr/bin/aarch64-linux-gnu-as /usr/bin/aarch64-linux-gnu-as.real
 sudo cp "$WRAPPER" /usr/bin/as
 sudo cp "$WRAPPER" /usr/bin/aarch64-linux-gnu-as
 
 echo "=== wrapper content ==="
 cat "$WRAPPER"
 echo "=== wrapper test (aarch64 path) ==="
-/usr/bin/aarch64-linux-gnu-as --version | head -1
+/usr/bin/aarch64-linux-gnu-as.real --version | head -1
 echo "=== wrapper test (host path) ==="
 /usr/bin/as.real --version | head -1
 echo "=== done ==="
