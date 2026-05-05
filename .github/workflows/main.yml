@@ -121,13 +121,14 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
-            DTC_EXT=dtc"
+            DTC_EXT=dtc \
+            KCONFIG_NOTIMESTAMP=1"
 
           echo ">>> 确认 as 指向包装器"
           which as && as --version | head -1
 
           echo ">>> 生成 defconfig"
-          make $COMMON_FLAGS camellia_defconfig
+          make $COMMON_FLAGS camellia_defconfig < /dev/null
 
           echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
@@ -136,7 +137,7 @@ jobs:
           echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
 
           echo ">>> olddefconfig 使配置正式生效"
-          make $COMMON_FLAGS olddefconfig
+          make $COMMON_FLAGS olddefconfig < /dev/null
 
           grep "STACKPROTECTOR" out/.config || true
 
