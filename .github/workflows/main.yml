@@ -62,11 +62,8 @@ jobs:
 
       - name: Create GNU assembler smart wrapper
         run: |
-          # 创建一个智能 as 包装器放在 clang/bin/ 最前面
-          # 检测到 -EL/-EB（aarch64 特有标志）时走交叉汇编器
-          # 否则走宿主机 x86_64 汇编器，避免 fixdep 等 host 工具出错
           python3 -c "
-          import os, stat
+          import os
           wrapper = '#!/bin/sh\nfor arg in \"\$@\"; do\n  case \"\$arg\" in\n    -EL|-EB)\n      exec /usr/bin/aarch64-linux-gnu-as \"\$@\"\n      ;;\n  esac\ndone\nexec /usr/bin/as \"\$@\"\n'
           d = '${{ env.CLANG_DIR }}/bin'
           for name in ['as', 'aarch64-linux-gnu-as']:
@@ -75,54 +72,53 @@ jobs:
               os.chmod(p, 0o755)
               print('created:', p)
           "
-          echo "=== wrapper content ==="
           cat ${{ env.CLANG_DIR }}/bin/as
 
       - name: Patch kernel source
         working-directory: kernel
         run: |
-          echo ">>> [1] 删除所有 -Werror，防止警告变错误"
-          find . \( -name "Makefile" -o -name "Kbuild" \) | \
-            xargs sed -i 's/-Werror\b//g'
+          echo ">>> [1] 删除所有 -Werror"
+          find . \( -name "Makefile" -o -name "Kbuild" \) | xargs sed -i 's/-Werror\b//g'
 
-          echo ">>> [2] 修复 prepare-compiler-check：跳过 stackprotector 编译器能力检查"
-          # 这个检查在用 clang 交叉编译时会误判为不支持，直接将整个检查块替换成空操作
-          # 匹配的模式：ifeq ($(call cc-option, $(stackp-flag)),)
-          # 将它和后面的 @echo ... && exit 1 一起注释掉
+          echo ">>> [2] 注释掉 prepare-compiler-check 里的 stackprotector exit 1"
+          # 只针对性地注释含 "exit 1" 且上下文是 stackprotector 的那一行
+          # 用 python 逐行处理，完全避免破坏 ifdef/else/endif 结构
           python3 - <<'PYEOF'
-          import re
-
           with open('Makefile', 'r') as f:
-              content = f.read()
+              lines = f.readlines()
 
-          # 找到 prepare-compiler-check 目标里检查 stackp-flag 的块并注释掉
-          # 原始内容类似：
-          #   ifeq ($(call cc-option, $(stackp-flag)),)
-          #       @echo Cannot use ... && exit 1
-          #   endif
-          pattern = r'(ifdef stackp-name.*?ifeq \(\$\(call cc-option.*?stackp-flag.*?\),\).*?exit 1.*?endif)'
-          replacement = lambda m: '\n'.join('# ' + line for line in m.group(0).split('\n'))
-          new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-
-          if new_content == content:
-              print('WARNING: stackp-flag pattern not matched, trying simpler approach')
-              # 备用方案：直接注释含 stackp-flag 的 exit 1 行
-              new_content = re.sub(
-                  r'(@echo Cannot use CONFIG_CC_STACKPROTECTOR.*?exit 1)',
-                  r'# \1',
-                  content,
-                  flags=re.DOTALL
-              )
+          out = []
+          i = 0
+          while i < len(lines):
+              line = lines[i]
+              # 找到：@echo Cannot use CONFIG_CC_STACKPROTECTOR_...
+              # 下一行（或同一行）有 exit 1
+              if 'Cannot use CONFIG_CC_STACKPROTECTOR' in line and 'exit 1' in line:
+                  out.append('# PATCHED: ' + line)
+              elif 'Cannot use CONFIG_CC_STACKPROTECTOR' in line:
+                  out.append('# PATCHED: ' + line)
+                  # 下一行可能是单独的 exit 1 或 && exit 1
+                  if i + 1 < len(lines) and 'exit 1' in lines[i + 1]:
+                      i += 1
+                      out.append('# PATCHED: ' + lines[i])
+              else:
+                  out.append(line)
+              i += 1
 
           with open('Makefile', 'w') as f:
-              f.write(new_content)
-          print('Makefile patched OK')
+              f.writelines(out)
+
+          # 验证
+          found = [l for l in out if 'Cannot use CONFIG_CC_STACKPROTECTOR' in l]
+          print(f'Patched {len(found)} line(s):')
+          for l in found:
+              print(' ', l.rstrip())
           PYEOF
 
-          echo ">>> [3] 验证 patch 结果"
-          grep -n "stackp-flag\|prepare-compiler-check\|Cannot use CONFIG_CC_STACKPROTECTOR" Makefile | head -20 || true
+          echo ">>> 验证结果（确认没有未注释的 exit 1）"
+          grep -n "Cannot use CONFIG_CC_STACKPROTECTOR" Makefile || true
 
-      - name: Generate defconfig and fix stackprotector in .config
+      - name: Generate defconfig and fix .config
         working-directory: kernel
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
@@ -152,26 +148,23 @@ jobs:
           echo ">>> 生成 defconfig"
           make $COMMON_FLAGS camellia_defconfig
 
-          echo ">>> 修改 .config：把 STACKPROTECTOR_STRONG 改成 NONE"
+          echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
           sed -i 's/CONFIG_CC_STACKPROTECTOR_REGULAR=y/# CONFIG_CC_STACKPROTECTOR_REGULAR is not set/' out/.config
-          sed -i '/CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
+          sed -i '/^CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
           echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
 
-          echo ">>> 用 olddefconfig 使配置生效"
+          echo ">>> olddefconfig 使配置正式生效"
           make $COMMON_FLAGS olddefconfig
 
-          echo ">>> 确认最终配置"
+          echo ">>> 最终 STACKPROTECTOR 配置"
           grep "STACKPROTECTOR" out/.config || true
-
-          echo "COMMON_FLAGS_EXPORT=$COMMON_FLAGS" >> $GITHUB_ENV
 
       - name: Build kernel
         working-directory: kernel
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          # 确认汇编器路由正确
           which as && as --version | head -1
           which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
 
