@@ -59,6 +59,13 @@ jobs:
           chmod +x bin/*
           bin/clang --version | head -1
 
+      - name: Clear ccache
+        run: |
+          sudo apt-get install -y ccache
+          ccache -C
+          ccache -z
+          echo "ccache cleared"
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
