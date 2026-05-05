@@ -87,6 +87,21 @@ jobs:
           which as
           as --version | head -1
 
+      - name: Diagnose source files
+        working-directory: kernel
+        run: |
+          echo "=== kernel/cfi.c lines 34-42 ==="
+          sed -n '34,42p' kernel/cfi.c
+
+          echo "=== xiaomi_touch.c lines 145-160 ==="
+          sed -n '145,160p' drivers/input/touchscreen/mediatek/xiaomi/xiaomi_touch.c
+
+          echo "=== xiaomi_touch Makefile ==="
+          cat drivers/input/touchscreen/mediatek/xiaomi/Makefile 2>/dev/null || echo "not found"
+
+          echo "=== xiaomi_touch Kbuild ==="
+          cat drivers/input/touchscreen/mediatek/xiaomi/Kbuild 2>/dev/null || echo "not found"
+
       - name: Patch kernel source
         working-directory: kernel
         run: |
@@ -95,9 +110,6 @@ jobs:
 
           echo ">>> [2] 注释掉 stackprotector exit 1"
           python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_stackprotector.py
-
-          echo ">>> [3] 修复 cfi.c 指针转换"
-          python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_cfi.py
 
       - name: Generate defconfig and fix .config
         working-directory: kernel
@@ -196,7 +208,7 @@ jobs:
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS ==="
-            grep -n -E "error:|Error|fatal:" build.log | head -80 || true
+            grep -n " error:" build.log | head -100 || true
             exit $BUILD_EXIT
           fi
 
