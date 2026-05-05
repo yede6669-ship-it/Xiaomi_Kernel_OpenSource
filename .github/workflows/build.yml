@@ -1,0 +1,188 @@
+name: Build Xiaomi Kernel
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Kernel branch to build (e.g., camellia-r-oss)'
+        required: false
+        default: 'camellia-r-oss'
+
+env:
+  CLANG_DIR: ${{ github.workspace }}/toolchain/clang
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          df -h
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: MiCode/Xiaomi_Kernel_OpenSource
+          ref: ${{ github.event.inputs.branch || 'camellia-r-oss' }}
+          path: kernel
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabihf \
+            make bc bison build-essential ccache curl flex \
+            git gnupg gperf wget tar \
+            liblz4-tool libncurses5-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush \
+            rsync libglib2.0-dev schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python3-pip cpio kmod ca-certificates \
+            zstd patchelf device-tree-compiler lib32z1
+          
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Setup LLVM/Clang toolchain
+        run: |
+          mkdir -p ${{ env.CLANG_DIR }}
+          cd ${{ env.CLANG_DIR }}
+          
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S=latest
+          
+          if [ -f "bin/clang" ]; then
+            chmod +x bin/*
+            ./bin/clang --version
+          else
+            echo "Clang installation failed!"
+            exit 1
+          fi
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 3G
+          key: kernel-build-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Patch kernel before build
+        run: |
+          cd kernel
+          
+          # Remove -Werror flags
+          find . -name "Makefile" -o -name "Kbuild" -o -name "*.mk" | \
+            xargs sed -i 's/-Werror//g' 2>/dev/null || true
+          
+          # Disable stack protector
+          if [ -f "arch/arm64/configs/camellia_defconfig" ]; then
+            sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' arch/arm64/configs/camellia_defconfig
+          fi
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          export CCACHE_DIR="${RUNNER_TEMP}/.ccache"
+          
+          # Verify toolchain
+          which clang
+          clang --version
+          which aarch64-linux-gnu-gcc
+          
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            CXX=clang++ \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            LD=ld.lld \
+            LDFLAGS=-fuse-ld=lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            STRINGS=llvm-strings \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            LLVM=1 \
+            LLVM_IAS=0"
+          
+          # Generate default config
+          make $COMMON_FLAGS camellia_defconfig 2>&1 | tail -20
+          
+          # Disable stack protector in .config
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
+          
+          echo "=== Stack protector config ==="
+          grep -i stackprotector out/.config || echo "Not found"
+          
+          # Compile kernel
+          echo "Starting kernel compilation..."
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ $BUILD_EXIT -eq 0 ]; then
+            echo "✓ Build completed successfully!"
+          else
+            echo "✗ Build failed with exit code: $BUILD_EXIT"
+            echo "=== Last 50 lines of build.log ==="
+            tail -50 build.log
+            exit $BUILD_EXIT
+          fi
+
+      - name: Verify build artifacts
+        if: always()
+        run: |
+          cd kernel
+          
+          echo "=== Checking boot files ==="
+          ls -lh out/arch/arm64/boot/ 2>/dev/null || echo "No boot directory found"
+          
+          echo "=== Checking kernel modules ==="
+          find out -name "*.ko" | wc -l
+          
+          echo "=== Build size ==="
+          du -sh out/ 2>/dev/null || echo "Could not calculate size"
+
+      - name: Upload kernel artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaomi-kernel-artifacts
+          path: |
+            kernel/out/arch/arm64/boot/Image*
+            kernel/out/arch/arm64/boot/dtbo.img
+            kernel/out/arch/arm64/boot/dts/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            kernel/build.log
+            kernel/.config
+          retention-days: 7
