@@ -65,6 +65,15 @@ jobs:
           max-size: 2G
           key: camellia-r-oss-${{ runner.os }}
 
+      - name: Install assembler wrapper
+        run: |
+          bash ${{ github.workspace }}/scripts_repo/.github/workflows/make_as_wrapper.sh \
+            ${{ env.CLANG_DIR }}/bin
+          echo "PATH check:"
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          which as
+          as --version | head -1
+
       - name: Patch kernel source
         working-directory: kernel
         run: |
@@ -83,7 +92,6 @@ jobs:
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            AS=aarch64-linux-gnu-as \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -95,11 +103,15 @@ jobs:
             HOSTCXX=g++ \
             HOSTLD=ld \
             HOSTAS=/usr/bin/as \
+            LLVM=1 \
             LLVM_IAS=0 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
             DTC_EXT=dtc"
+
+          echo ">>> 确认 as 指向包装器"
+          which as && as --version | head -1
 
           echo ">>> 生成 defconfig"
           make $COMMON_FLAGS camellia_defconfig
@@ -113,7 +125,6 @@ jobs:
           echo ">>> olddefconfig 使配置正式生效"
           make $COMMON_FLAGS olddefconfig
 
-          echo ">>> 最终 STACKPROTECTOR 配置"
           grep "STACKPROTECTOR" out/.config || true
 
       - name: Build kernel
@@ -121,16 +132,13 @@ jobs:
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
 
-          echo ">>> 验证工具链"
-          which clang && clang --version | head -1
-          which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
-          which ld.lld && ld.lld --version | head -1
+          echo ">>> 确认 as 指向包装器"
+          which as && as --version | head -1
 
           COMMON_FLAGS="O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            AS=aarch64-linux-gnu-as \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -142,6 +150,7 @@ jobs:
             HOSTCXX=g++ \
             HOSTLD=ld \
             HOSTAS=/usr/bin/as \
+            LLVM=1 \
             LLVM_IAS=0 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
