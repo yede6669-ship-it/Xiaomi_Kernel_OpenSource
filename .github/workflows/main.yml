@@ -1,54 +1,46 @@
-name: Build Camellia Kernel (Stable CI)
+name: Build Camellia Kernel + Boot.img
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      # ✅ 拉 kernel 源码
-      - name: Checkout kernel source
+      # 1️⃣ 拉 kernel
+      - name: Checkout kernel
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
           ref: camellia-r-oss
           path: kernel
 
-      # ✅ 修复 apt 卡死 + 安装依赖
-      - name: Install dependencies (fixed mirror)
+      # 2️⃣ 修 apt + 安装依赖
+      - name: Install dependencies
         run: |
-          echo ">>> Fix apt sources"
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
-          sudo sed -i 's|http://security.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
-
-          sudo rm -rf /var/lib/apt/lists/*
           sudo apt-get clean
+          sudo apt-get -o Acquire::ForceIPv4=true update -y
 
-          echo ">>> apt update"
-          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update -y
-
-          echo ">>> install packages"
           sudo apt-get install -y \
             bc bison flex build-essential curl git \
             libssl-dev libncurses5-dev \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabihf \
-            device-tree-compiler
+            device-tree-compiler \
+            cpio unzip
 
-      # ✅ 下载稳定 clang（不要 AntMan）
-      - name: Download Proton Clang
+      # 3️⃣ clang
+      - name: Download clang
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-      - name: Setup environment
+      - name: Setup env
         run: |
           echo "CLANG_PATH=$(pwd)/clang/bin" >> $GITHUB_ENV
 
-      # ✅ 编译 kernel（标准流程）
+      # 4️⃣ 编译 kernel（修 Werror）
       - name: Build kernel
         working-directory: kernel
         run: |
@@ -67,39 +59,57 @@ jobs:
 
           mkdir -p out
 
-          echo ">>> defconfig"
           make O=out camellia_defconfig
 
-          echo ">>> build kernel"
-          make -j$(nproc) O=out 2>&1 | tee build.log
+          make -j$(nproc) \
+            O=out \
+            KCFLAGS=-Wno-error \
+            2>&1 | tee build.log
 
-      # ✅ 查看输出
-      - name: Check build output
-        if: always()
+      # 5️⃣ 下载 stock boot.img（你必须换成自己的！）
+      - name: Download stock boot
         run: |
-          echo ">>> boot dir:"
-          ls -lh kernel/out/arch/arm64/boot/ || true
+          echo ">>> 下载示例 boot.img（你应该换成自己机型）"
+          curl -L -o boot.img https://github.com/topjohnwu/magisk-files/raw/master/boot.img
 
-          echo ">>> find images:"
-          find kernel/out -name "Image*" || true
+      # 6️⃣ 解包 boot.img
+      - name: Unpack boot
+        run: |
+          git clone https://github.com/osm0sis/mkbootimg_tools tools
+          cd tools
 
-      # ✅ 上传 kernel
-      - name: Upload kernel image
-        if: success()
+          chmod +x unpackbootimg.sh
+          ./unpackbootimg.sh ../boot.img
+
+      # 7️⃣ 替换 kernel
+      - name: Replace kernel
+        run: |
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb tools/zImage
+
+      # 8️⃣ 重新打包 boot.img
+      - name: Repack boot
+        run: |
+          cd tools
+
+          chmod +x mkbootimg.sh
+
+          ./mkbootimg.sh \
+            --kernel zImage \
+            --ramdisk ramdisk.cpio.gz \
+            --cmdline "$(cat boot.img-cmdline)" \
+            --base $(cat boot.img-base) \
+            --pagesize $(cat boot.img-pagesize) \
+            --output new-boot.img
+
+          mv new-boot.img ../boot-new.img
+
+      # 9️⃣ 上传
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: camellia-kernel-${{ github.run_number }}
+          name: camellia-kernel
           path: |
             kernel/out/arch/arm64/boot/Image*
             kernel/out/arch/arm64/boot/dtbo.img
-          if-no-files-found: warn
-          retention-days: 7
-
-      # ✅ 上传日志（关键）
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.run_number }}
-          path: kernel/build.log
-          retention-days: 3
+            boot-new.img
+            kernel/build.log
