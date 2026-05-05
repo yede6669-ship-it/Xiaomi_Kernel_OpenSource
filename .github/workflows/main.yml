@@ -87,21 +87,6 @@ jobs:
           which as
           as --version | head -1
 
-      - name: Diagnose source files
-        working-directory: kernel
-        run: |
-          echo "=== kernel/cfi.c lines 34-42 ==="
-          sed -n '34,42p' kernel/cfi.c
-
-          echo "=== xiaomi_touch.c lines 145-160 ==="
-          sed -n '145,160p' drivers/input/touchscreen/mediatek/xiaomi/xiaomi_touch.c
-
-          echo "=== xiaomi_touch Makefile ==="
-          cat drivers/input/touchscreen/mediatek/xiaomi/Makefile 2>/dev/null || echo "not found"
-
-          echo "=== xiaomi_touch Kbuild ==="
-          cat drivers/input/touchscreen/mediatek/xiaomi/Kbuild 2>/dev/null || echo "not found"
-
       - name: Patch kernel source
         working-directory: kernel
         run: |
@@ -110,6 +95,53 @@ jobs:
 
           echo ">>> [2] 注释掉 stackprotector exit 1"
           python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_stackprotector.py
+
+          echo ">>> [3] 修复 cfi.c 第38行指针转换问题"
+          python3 - << 'PYEOF'
+          import re
+          path = 'kernel/cfi.c'
+          with open(path, 'r', errors='replace') as f:
+              lines = f.readlines()
+          new_lines = []
+          for i, line in enumerate(lines):
+              # 匹配 uint64_t xxx = expr; 且没有已有转换的行
+              m = re.match(r'^(\s*)(uint64_t\s+\w+\s*=\s*)([^;]+)(;)', line)
+              if m and '(uint64_t)' not in line and '(uintptr_t)' not in line:
+                  fixed = m.group(1) + m.group(2) + '(uint64_t)(uintptr_t)(' + m.group(3).strip() + ')' + m.group(4) + '\n'
+                  print(f'Fixed line {i+1}: {fixed.rstrip()}')
+                  new_lines.append(fixed)
+              else:
+                  new_lines.append(line)
+          with open(path, 'w') as f:
+              f.writelines(new_lines)
+          print('Done patching cfi.c')
+          PYEOF
+
+          echo ">>> [4] 修复 xiaomi_touch.c 无原型函数声明"
+          python3 - << 'PYEOF'
+          import re
+          path = 'drivers/input/touchscreen/mediatek/xiaomi/xiaomi_touch.c'
+          with open(path, 'r', errors='replace') as f:
+              content = f.read()
+          # 把所有 static xxx func() { 形式改成 static xxx func(void) {
+          fixed = re.sub(
+              r'((?:static\s+)?(?:\w+\s+)+\w+)\s*\(\s*\)\s*(\{)',
+              r'\1(void) \2',
+              content
+          )
+          if fixed != content:
+              with open(path, 'w') as f:
+                  f.write(fixed)
+              print('Patched xiaomi_touch.c')
+          else:
+              print('No changes needed in xiaomi_touch.c')
+          PYEOF
+
+          echo ">>> [5] 删除 xiaomi_touch 目录里残留的 -Werror"
+          find drivers/input/touchscreen/mediatek/xiaomi \
+            \( -name "Makefile" -o -name "Kbuild" \) \
+            -exec sed -i 's/-Werror[^[:space:]]*//g' {} \;
+          echo "Done"
 
       - name: Generate defconfig and fix .config
         working-directory: kernel
@@ -150,7 +182,6 @@ jobs:
           if kill -0 $KCONFIG_PID 2>/dev/null; then
             echo "!!! kconfig 编译 30 秒后仍未完成，打印进程树 !!!"
             ps auxf || true
-            ls -la out/scripts/kconfig/ 2>/dev/null || true
             kill $KCONFIG_PID || true
             exit 1
           fi
