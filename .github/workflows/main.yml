@@ -1,28 +1,99 @@
-- name: Patch kernel source
-        working-directory: kernel
+name: Build Camellia Kernel
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CLANG_DIR: ${{ github.workspace }}/toolchain/clang
+
+jobs:
+  build:
+    name: Build Kernel (camellia-r-oss)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: MiCode/Xiaomi_Kernel_OpenSource
+          ref: camellia-r-oss
+          path: kernel
+          fetch-depth: 1
+
+      - name: Install build dependencies
         run: |
-          echo ">>> [1] 用 Python 安全删除 -Werror 系列标志"
-          python3 -c "
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabihf \
+            make bc bison build-essential ccache curl flex \
+            git gnupg gperf wget tar \
+            liblz4-tool libncurses5-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush \
+            rsync libglib2.0-dev schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python3-pip cpio kmod ca-certificates \
+            zstd patchelf device-tree-compiler
+          aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-as --version | head -1
+
+      - name: Download Clang toolchain via AntMan
+        run: |
+          mkdir -p ${{ env.CLANG_DIR }}
+          cd ${{ env.CLANG_DIR }}
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          chmod +x bin/*
+          bin/clang --version | head -1
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 2G
+          key: camellia-r-oss-${{ runner.os }}
+
+      - name: Write helper scripts
+        run: |
+          cat > /tmp/make_wrapper.py << 'ENDOFSCRIPT'
+          import os
+          wrapper = '#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in\n    -EL|-EB)\n      exec /usr/bin/aarch64-linux-gnu-as "$@"\n      ;;\n  esac\ndone\nexec /usr/bin/as "$@"\n'
+          d = os.environ['CLANG_DIR'] + '/bin'
+          for name in ['as', 'aarch64-linux-gnu-as']:
+              p = os.path.join(d, name)
+              open(p, 'w').write(wrapper)
+              os.chmod(p, 0o755)
+              print('created: ' + p)
+          ENDOFSCRIPT
+
+          cat > /tmp/patch_kernel.py << 'ENDOFSCRIPT'
           import re, os, sys
 
           def safe_remove_werror(text):
-              # 只删除独立的 -Werror 标志，不能动 \$(call ...) 里面的内容
-              # 策略：逐个 token 扫描，跳过包含 \$( 的 token
+              lines = text.split('\n')
               result = []
-              for token in text.split(' '):
-                  # 如果 token 包含 Makefile 变量展开，原样保留
-                  if '\$(') in token:
-                      result.append(token)
-                  # 删除 -Werror=xxx 和独立 -Werror
-                  elif re.match(r'^-Werror(=[^\s]*)?$', token):
-                      pass  # 丢弃
-                  else:
-                      result.append(token)
-              return ' '.join(result)
+              for line in lines:
+                  tokens = line.split(' ')
+                  new_tokens = []
+                  for token in tokens:
+                      if '$(' in token:
+                          new_tokens.append(token)
+                      elif re.match(r'^-Werror(=[^\s]*)?$', token):
+                          pass
+                      else:
+                          new_tokens.append(token)
+                  result.append(' '.join(new_tokens))
+              return '\n'.join(result)
 
           makefiles = []
           for root, dirs, files in os.walk('.'):
-              # 跳过 .git
               dirs[:] = [d for d in dirs if d != '.git']
               for fname in files:
                   if fname in ('Makefile', 'Kbuild') or fname.endswith('.mk'):
@@ -39,12 +110,11 @@
                           f.write(new)
                       changed += 1
               except Exception as e:
-                  print('skip', path, e)
+                  print('skip ' + path + ': ' + str(e))
           print(str(changed) + ' file(s) modified')
-          "
+          ENDOFSCRIPT
 
-          echo ">>> [2] 注释掉 stackprotector exit 1"
-          python3 -c "
+          cat > /tmp/patch_stackprotector.py << 'ENDOFSCRIPT'
           with open('Makefile', 'r') as f:
               lines = f.readlines()
           out = []
@@ -67,17 +137,128 @@
           print(str(len(patched)) + ' line(s) patched')
           for l in patched:
               print(l.rstrip())
-          "
+          ENDOFSCRIPT
 
-          echo ">>> [3] 验证 Makefile 括号完整性"
-          python3 -c "
-          with open('Makefile', 'r') as f:
-              content = f.read()
-          depth = 0
-          for i, ch in enumerate(content):
-              if ch == '(':
-                  depth += 1
-              elif ch == ')':
-                  depth -= 1
-          print('bracket depth at EOF:', depth, '(should be 0)')
-          "
+      - name: Create assembler wrapper
+        run: |
+          CLANG_DIR=${{ env.CLANG_DIR }} python3 /tmp/make_wrapper.py
+          cat ${{ env.CLANG_DIR }}/bin/as
+
+      - name: Patch kernel source
+        working-directory: kernel
+        run: |
+          echo ">>> [1] 安全删除 -Werror 系列标志"
+          python3 /tmp/patch_kernel.py
+
+          echo ">>> [2] 注释掉 stackprotector exit 1"
+          python3 /tmp/patch_stackprotector.py
+
+      - name: Generate defconfig and fix .config
+        working-directory: kernel
+        run: |
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=/usr/bin/as \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc"
+
+          echo ">>> 生成 defconfig"
+          make $COMMON_FLAGS camellia_defconfig
+
+          echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_REGULAR=y/# CONFIG_CC_STACKPROTECTOR_REGULAR is not set/' out/.config
+          sed -i '/^CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
+
+          echo ">>> olddefconfig 使配置正式生效"
+          make $COMMON_FLAGS olddefconfig
+
+          echo ">>> 最终 STACKPROTECTOR 配置"
+          grep "STACKPROTECTOR" out/.config || true
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+
+          which as && as --version | head -1
+          which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
+
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=/usr/bin/as \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc"
+
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          echo "=== Build exit code: $BUILD_EXIT ==="
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "=== ERRORS ==="
+            grep -n -E "error:|Error|fatal:" build.log | head -80 || true
+            exit $BUILD_EXIT
+          fi
+
+      - name: Check build output
+        if: always()
+        run: |
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
+          find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
+
+      - name: Upload kernel image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellia-kernel-${{ github.run_number }}
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/build.log
+          if-no-files-found: ignore
+          retention-days: 3
