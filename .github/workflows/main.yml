@@ -1,71 +1,60 @@
-name: Build Xiaomi Kernel
+name: Build Camellia Kernel (Stable CI)
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
-      KERNEL_DEFCONFIG: camellia_defconfig   # 改成你的机型对应的 defconfig
+      KERNEL_DIR: ${{ github.workspace }}/kernel
+      OUT_DIR: ${{ github.workspace }}/kernel/out
+      TOOLS_DIR: ${{ github.workspace }}/tools
 
     steps:
-    - name: Checkout source
-      uses: actions/checkout@v3
-      with:
-        submodules: true
+      - name: Checkout repo
+        uses: actions/checkout@v3
+        with:
+          submodules: true
 
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y git curl unzip bc build-essential flex bison libssl-dev libncurses5-dev
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bc build-essential libncurses-dev bison flex libssl-dev curl unzip wget git
 
-    - name: Download mkbootimg tools
-      run: |
-        mkdir -p tools
-        curl -L -o tools/mkbootimg_tools.zip https://github.com/osm0sis/mkbootimg_tools/archive/refs/heads/master.zip
-        unzip tools/mkbootimg_tools.zip -d tools
-        mv tools/mkbootimg_tools-master/* tools/
-        chmod +x tools/*.sh
+      - name: Download example boot.img
+        run: |
+          mkdir -p $OUT_DIR
+          cd $OUT_DIR
+          # 示例 boot.img，你可以后续替换成自己机型的 boot.img
+          curl -L -o boot.img https://example.com/boot.img
 
-    - name: Setup kernel defconfig
-      run: |
-        make O=out $KERNEL_DEFCONFIG
+      - name: Clone mkbootimg_tools
+        run: |
+          # 浅克隆避免认证问题
+          git clone --depth=1 https://github.com/osm0sis/mkbootimg_tools.git $TOOLS_DIR
 
-    - name: Build Kernel
-      run: |
-        # 屏蔽 warnings 导致的编译失败
-        make -j$(nproc) O=out KCFLAGS="-Wno-error" 2>&1 | tee build.log
+      - name: Build kernel
+        run: |
+          cd $KERNEL_DIR
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make O=$OUT_DIR camellia_defconfig
+          make -j$(nproc) O=$OUT_DIR
 
-    - name: Check boot image
-      run: |
-        echo ">>> boot dir:"
-        ls -al out/arch/arm64/boot/
+      - name: Check boot image
+        run: |
+          ls -lh $OUT_DIR
+          file $OUT_DIR/Image
+          file $OUT_DIR/dtbo.img
 
-    - name: Pack boot.img
-      run: |
-        # 下载示例 boot.img (你自己的机型换成真实 boot.img)
-        curl -L -o boot.img https://example.com/your_boot.img
-        # 使用 mkbootimg 工具重新打包
-        tools/unpackbootimg.sh boot.img -o out/
-        tools/mkbootimg.sh --kernel out/arch/arm64/boot/Image \
-          --ramdisk out/ramdisk.gz \
-          --cmdline "console=ttyS0,115200n8" \
-          --output out/boot-new.img
-
-    - name: Upload boot.img artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: boot-new.img
-        path: out/boot-new.img
-
-    - name: Upload build log
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log
-        path: build.log
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-image
+          path: |
+            $OUT_DIR/Image
+            $OUT_DIR/dtbo.img
