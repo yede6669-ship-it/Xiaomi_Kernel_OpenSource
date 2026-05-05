@@ -1,229 +1,41 @@
-name: Build Camellia Kernel
-
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
-
-env:
-  CLANG_DIR: ${{ github.workspace }}/toolchain/clang
-
-jobs:
-  build:
-    name: Build Kernel (camellia-r-oss)
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: camellia-r-oss
-          path: kernel
-          fetch-depth: 1
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabihf \
-            binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabihf \
-            make bc bison build-essential ccache curl flex \
-            git gnupg gperf wget tar \
-            liblz4-tool libncurses5-dev libssl-dev \
-            libxml2 libxml2-utils lzop pngcrush \
-            rsync libglib2.0-dev schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python3 python3-pip cpio kmod ca-certificates \
-            zstd patchelf device-tree-compiler
-          aarch64-linux-gnu-gcc --version | head -1
-          aarch64-linux-gnu-as --version | head -1
-
-      - name: Download Clang toolchain via AntMan
-        run: |
-          mkdir -p ${{ env.CLANG_DIR }}
-          cd ${{ env.CLANG_DIR }}
-          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
-          chmod +x antman
-          ./antman -S
-          chmod +x bin/*
-          bin/clang --version | head -1
-
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          max-size: 2G
-          key: camellia-r-oss-${{ runner.os }}
-
-      - name: Create GNU assembler smart wrapper
-        run: |
-          python3 -c "
-          import os
-          wrapper = '#!/bin/sh\nfor arg in \"\$@\"; do\n  case \"\$arg\" in\n    -EL|-EB)\n      exec /usr/bin/aarch64-linux-gnu-as \"\$@\"\n      ;;\n  esac\ndone\nexec /usr/bin/as \"\$@\"\n'
-          d = '${{ env.CLANG_DIR }}/bin'
-          for name in ['as', 'aarch64-linux-gnu-as']:
-              p = os.path.join(d, name)
-              open(p, 'w').write(wrapper)
-              os.chmod(p, 0o755)
-              print('created:', p)
-          "
-          cat ${{ env.CLANG_DIR }}/bin/as
-
-      - name: Patch kernel source
+- name: Patch kernel source
         working-directory: kernel
         run: |
-          echo ">>> [1] 删除所有 -Werror"
-          find . \( -name "Makefile" -o -name "Kbuild" \) | xargs sed -i 's/-Werror\b//g'
+          echo ">>> [1] 修复 -Werror：整体删除 -Werror 及其 =xxx 变体"
+          # 必须同时处理两种形式：
+          #   -Werror=something  →  整体删除
+          #   -Werror（独立）    →  删除
+          find . \( -name "Makefile" -o -name "Kbuild" \) | \
+            xargs sed -i \
+              -e 's/-Werror=[^ \t]*//g' \
+              -e 's/-Werror\b//g'
 
-          echo ">>> [2] 注释掉 prepare-compiler-check 里的 stackprotector exit 1"
-          # 只针对性地注释含 "exit 1" 且上下文是 stackprotector 的那一行
-          # 用 python 逐行处理，完全避免破坏 ifdef/else/endif 结构
-          python3 - <<'PYEOF'
+          echo ">>> [2] 注释掉 stackprotector exit 1"
+          python3 -c "
           with open('Makefile', 'r') as f:
               lines = f.readlines()
-
           out = []
           i = 0
           while i < len(lines):
               line = lines[i]
-              # 找到：@echo Cannot use CONFIG_CC_STACKPROTECTOR_...
-              # 下一行（或同一行）有 exit 1
               if 'Cannot use CONFIG_CC_STACKPROTECTOR' in line and 'exit 1' in line:
                   out.append('# PATCHED: ' + line)
               elif 'Cannot use CONFIG_CC_STACKPROTECTOR' in line:
                   out.append('# PATCHED: ' + line)
-                  # 下一行可能是单独的 exit 1 或 && exit 1
                   if i + 1 < len(lines) and 'exit 1' in lines[i + 1]:
                       i += 1
                       out.append('# PATCHED: ' + lines[i])
               else:
                   out.append(line)
               i += 1
-
           with open('Makefile', 'w') as f:
               f.writelines(out)
-
-          # 验证
-          found = [l for l in out if 'Cannot use CONFIG_CC_STACKPROTECTOR' in l]
-          print(f'Patched {len(found)} line(s):')
-          for l in found:
+          patched = [l for l in out if 'PATCHED' in l]
+          print(f'Patched {len(patched)} line(s)')
+          for l in patched:
               print(' ', l.rstrip())
-          PYEOF
+          "
 
-          echo ">>> 验证结果（确认没有未注释的 exit 1）"
-          grep -n "Cannot use CONFIG_CC_STACKPROTECTOR" Makefile || true
-
-      - name: Generate defconfig and fix .config
-        working-directory: kernel
-        run: |
-          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
-
-          COMMON_FLAGS="O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            READELF=llvm-readelf \
-            STRIP=llvm-strip \
-            HOSTCC=gcc \
-            HOSTCXX=g++ \
-            HOSTLD=ld \
-            HOSTAS=/usr/bin/as \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
-            DTC_EXT=dtc"
-
-          echo ">>> 生成 defconfig"
-          make $COMMON_FLAGS camellia_defconfig
-
-          echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
-          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
-          sed -i 's/CONFIG_CC_STACKPROTECTOR_REGULAR=y/# CONFIG_CC_STACKPROTECTOR_REGULAR is not set/' out/.config
-          sed -i '/^CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
-          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
-
-          echo ">>> olddefconfig 使配置正式生效"
-          make $COMMON_FLAGS olddefconfig
-
-          echo ">>> 最终 STACKPROTECTOR 配置"
-          grep "STACKPROTECTOR" out/.config || true
-
-      - name: Build kernel
-        working-directory: kernel
-        run: |
-          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
-
-          which as && as --version | head -1
-          which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
-
-          COMMON_FLAGS="O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            READELF=llvm-readelf \
-            STRIP=llvm-strip \
-            HOSTCC=gcc \
-            HOSTCXX=g++ \
-            HOSTLD=ld \
-            HOSTAS=/usr/bin/as \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
-            DTC_EXT=dtc"
-
-          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
-          BUILD_EXIT=${PIPESTATUS[0]}
-
-          echo "=== Build exit code: $BUILD_EXIT ==="
-          if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== ERRORS ==="
-            grep -n -E "error:|Error|fatal:" build.log | head -80 || true
-            exit $BUILD_EXIT
-          fi
-
-      - name: Check build output
-        if: always()
-        run: |
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
-          find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
-
-      - name: Upload kernel image
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: camellia-kernel-${{ github.run_number }}
-          path: |
-            kernel/out/arch/arm64/boot/Image.gz-dtb
-            kernel/out/arch/arm64/boot/Image.gz
-            kernel/out/arch/arm64/boot/Image
-            kernel/out/arch/arm64/boot/dtbo.img
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.run_number }}
-          path: kernel/build.log
-          if-no-files-found: ignore
-          retention-days: 3
+          echo ">>> 验证：确认没有残留的裸 =xxx 参数"
+          grep -rn -- '=implicit-function-declaration\|=unknown-warning' \
+            --include="Makefile" --include="Kbuild" . || echo "OK: 无残留"
