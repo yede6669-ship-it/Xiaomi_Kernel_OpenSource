@@ -129,8 +129,6 @@ cmdq_path = 'drivers/soc/mediatek/mtk-cmdq-helper.c'
 try:
     with open(cmdq_path, 'r', errors='replace') as f:
         lines = f.readlines()
-
-    # 这些行是指针返回类型函数里的裸 return -ENOMEM，需要改成 ERR_PTR
     target_lines = {174, 190, 384, 410, 507, 598, 1491}
     changed_cmdq = False
     new_lines = []
@@ -143,7 +141,6 @@ try:
             changed_cmdq = True
         else:
             new_lines.append(line)
-
     if changed_cmdq:
         with open(cmdq_path, 'w') as f:
             f.writelines(new_lines)
@@ -191,3 +188,21 @@ try:
         print('skip ' + mfg_path + ': pattern not found')
 except Exception as e:
     print('skip ' + mfg_path + ': ' + str(e))
+
+# ── Fix: mtk-vcu Makefile 重复链接 mtk_vcodec_mem.o ─────────────────────────
+vcu_mk_path = 'drivers/media/platform/mtk-vcu/Makefile'
+try:
+    with open(vcu_mk_path, 'r', errors='replace') as f:
+        src = f.read()
+    new_src = src.replace(
+        'obj-$(CONFIG_VIDEO_MEDIATEK_VCU) += mtk-vcu.o mtk_vcodec_mem.o',
+        'obj-$(CONFIG_VIDEO_MEDIATEK_VCU) += mtk-vcu.o'
+    )
+    if new_src != src:
+        with open(vcu_mk_path, 'w') as f:
+            f.write(new_src)
+        print('patched ' + vcu_mk_path)
+    else:
+        print('skip ' + vcu_mk_path + ': pattern not found')
+except Exception as e:
+    print('skip ' + vcu_mk_path + ': ' + str(e))
