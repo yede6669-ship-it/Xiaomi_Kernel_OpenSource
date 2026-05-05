@@ -69,10 +69,10 @@ jobs:
         working-directory: kernel
         run: |
           echo ">>> [1] 安全删除 -Werror 系列标志"
-          python3 ${{ github.workspace }}/scripts_repo/.github/scripts/patch_kernel.py
+          python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_kernel.py
 
           echo ">>> [2] 注释掉 stackprotector exit 1"
-          python3 ${{ github.workspace }}/scripts_repo/.github/scripts/patch_stackprotector.py
+          python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_stackprotector.py
 
       - name: Generate defconfig and fix .config
         working-directory: kernel
