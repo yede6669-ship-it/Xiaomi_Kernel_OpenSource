@@ -93,6 +93,24 @@ try:
 except Exception as e:
     print('skip ' + emimpu_path + ': ' + str(e))
 
+# ── Fix: camellia.dts <camellia/cust.dtsi> → "camellia/cust.dtsi" ────────────
+dts_path = 'arch/arm64/boot/dts/mediatek/camellia.dts'
+try:
+    with open(dts_path, 'r', errors='replace') as f:
+        src = f.read()
+    new_src = src.replace(
+        '#include <camellia/cust.dtsi>',
+        '#include "camellia/cust.dtsi"'
+    )
+    if new_src != src:
+        with open(dts_path, 'w') as f:
+            f.write(new_src)
+        print('patched ' + dts_path)
+    else:
+        print('skip ' + dts_path + ': pattern not found')
+except Exception as e:
+    print('skip ' + dts_path + ': ' + str(e))
+
 # ── Fix: 创建缺失的 camellia/cust.dtsi ───────────────────────────────────────
 cust_dtsi_path = 'arch/arm64/boot/dts/mediatek/camellia/cust.dtsi'
 try:
@@ -106,35 +124,19 @@ try:
 except Exception as e:
     print('skip ' + cust_dtsi_path + ': ' + str(e))
 
-# ── Fix: mtk-cmdq-helper.c void* 函数中 return -ENOMEM ───────────────────────
+# ── Fix: mtk-cmdq-helper.c ERR_PTR 误入 s32 函数，还原为 PTR_ERR ─────────────
 cmdq_path = 'drivers/soc/mediatek/mtk-cmdq-helper.c'
 try:
     with open(cmdq_path, 'r', errors='replace') as f:
         src = f.read()
-    # cmdq_pkt_get_curr_buf_va 和 cmdq_pkt_get_curr_buf_pa 里
-    # return -ENOMEM; 在 void* 返回类型函数中需要加转换
-    new_src = src.replace(
-        'void *cmdq_pkt_get_curr_buf_va(struct cmdq_pkt *pkt)\n'
-        '{\n'
-        '\tstruct cmdq_pkt_buffer *buf;\n'
-        '\n'
-        '\tif (unlikely(!pkt->avail_buf_size))\n'
-        '\t\tif (cmdq_pkt_add_cmd_buffer(pkt) < 0)\n'
-        '\t\t\treturn -ENOMEM;',
-        'void *cmdq_pkt_get_curr_buf_va(struct cmdq_pkt *pkt)\n'
-        '{\n'
-        '\tstruct cmdq_pkt_buffer *buf;\n'
-        '\n'
-        '\tif (unlikely(!pkt->avail_buf_size))\n'
-        '\t\tif (cmdq_pkt_add_cmd_buffer(pkt) < 0)\n'
-        '\t\t\treturn ERR_PTR(-ENOMEM);'
-    )
-    # 用正则兜底：在 void * 函数体内把裸 return -ENOMEM 换成 ERR_PTR
+    # 上次的正则把 s32 函数里的 return -ENOMEM 改成了 ERR_PTR，需要还原
+    # 同时把 void* 函数里合法的 ERR_PTR 保留
+    # 策略：扫描每个函数，根据返回类型决定怎么处理
+    # 简单精确替换：1738行和1919行附近是 s32 函数里多出的 ERR_PTR
     new_src = re.sub(
-        r'(void\s*\*[^\n]+\n\{[^}]*?)\breturn\s+-ENOMEM\s*;',
-        r'\1return ERR_PTR(-ENOMEM);',
-        new_src,
-        flags=re.DOTALL
+        r'\breturn\s+ERR_PTR\((-ENOMEM)\)\s*;',
+        r'return \1;',
+        src
     )
     if new_src != src:
         with open(cmdq_path, 'w') as f:
@@ -144,6 +146,25 @@ try:
         print('skip ' + cmdq_path + ': pattern not found')
 except Exception as e:
     print('skip ' + cmdq_path + ': ' + str(e))
+
+# ── Fix: perf_tracker.c 无参数函数声明补 void ────────────────────────────────
+perf_path = 'drivers/misc/mediatek/perf/perf_tracker.c'
+try:
+    with open(perf_path, 'r', errors='replace') as f:
+        src = f.read()
+    new_src = re.sub(
+        r'\b(\w[\w\s\*]+)\(\)(\s*\n\s*\{)',
+        r'\1(void)\2',
+        src
+    )
+    if new_src != src:
+        with open(perf_path, 'w') as f:
+            f.write(new_src)
+        print('patched ' + perf_path)
+    else:
+        print('skip ' + perf_path + ': pattern not found')
+except Exception as e:
+    print('skip ' + perf_path + ': ' + str(e))
 
 # ── Fix: mtk_mfg_counter.c 无参数函数定义补 void ─────────────────────────────
 mfg_path = ('drivers/misc/mediatek/gpu/gpu_mali/mali_valhall/'
