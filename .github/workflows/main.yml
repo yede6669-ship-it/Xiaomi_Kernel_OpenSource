@@ -1,4 +1,4 @@
-name: Build Camellia Kernel (Stable)
+name: Build Camellia Kernel (Stable CI)
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      # ✅ 拉 kernel 源码
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -17,25 +18,37 @@ jobs:
           ref: camellia-r-oss
           path: kernel
 
-      - name: Install dependencies
+      # ✅ 修复 apt 卡死 + 安装依赖
+      - name: Install dependencies (fixed mirror)
         run: |
-          sudo apt update
-          sudo apt install -y \
+          echo ">>> Fix apt sources"
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+          sudo sed -i 's|http://security.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get clean
+
+          echo ">>> apt update"
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update -y
+
+          echo ">>> install packages"
+          sudo apt-get install -y \
             bc bison flex build-essential curl git \
             libssl-dev libncurses5-dev \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabihf \
             device-tree-compiler
 
-      # ✅ 用稳定 toolchain（不要 AntMan）
+      # ✅ 下载稳定 clang（不要 AntMan）
       - name: Download Proton Clang
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-      - name: Setup env
+      - name: Setup environment
         run: |
           echo "CLANG_PATH=$(pwd)/clang/bin" >> $GITHUB_ENV
 
+      # ✅ 编译 kernel（标准流程）
       - name: Build kernel
         working-directory: kernel
         run: |
@@ -57,18 +70,36 @@ jobs:
           echo ">>> defconfig"
           make O=out camellia_defconfig
 
-          echo ">>> build"
+          echo ">>> build kernel"
           make -j$(nproc) O=out 2>&1 | tee build.log
 
-      - name: Check output
+      # ✅ 查看输出
+      - name: Check build output
+        if: always()
         run: |
+          echo ">>> boot dir:"
           ls -lh kernel/out/arch/arm64/boot/ || true
+
+          echo ">>> find images:"
           find kernel/out -name "Image*" || true
 
-      - name: Upload artifacts
+      # ✅ 上传 kernel
+      - name: Upload kernel image
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
+          name: camellia-kernel-${{ github.run_number }}
           path: |
             kernel/out/arch/arm64/boot/Image*
             kernel/out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ✅ 上传日志（关键）
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/build.log
+          retention-days: 3
