@@ -1,4 +1,4 @@
-name: Aghisna R20 Camellia Clean Build
+name: Aghisna R20 Camellia Final Strike
 
 on:
   workflow_dispatch:
@@ -25,38 +25,34 @@ jobs:
 
     - name: Build Kernel
       run: |
-          # 1. 结构检查：确保 Makefile 在根目录
+          # 1. 结构检查
           if [ ! -f "Makefile" ]; then
             M_PATH=$(find . -name "Makefile" -printf '%h' -quit)
             [ -n "$M_PATH" ] && cp -af $M_PATH/. .
           fi
 
-          # 2. 下载并清理脚本环境
+          # 2. 下载并初始化脚本
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
-          rm -rf /home/runner/clang # 彻底删除旧工具链目录
+          rm -rf /home/runner/clang 
 
-          # 3. 适配脚本逻辑
+          # 3. 适配脚本参数
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
-          
-          # 4. 禁用脚本内自带的物理清理，防止冲突
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
 
-          # 5. 【核心修复注入】
-          # 修改脚本中的 make 命令：
-          # - LLVM=1 LLVM_IAS=1: 强制使用 Clang 内置汇编器，解决 -EL 报错
-          # - KCFLAGS: 解决 cfi.c 指针转换报错
-          sed -i 's/make -j$(nproc --all) O=out/make -j$(nproc --all) O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error=int-conversion -Wno-error=implicit-function-declaration"/g' miui-r20.sh
-          
-          # 6. 注入 MTK 堆栈保护补丁（关闭堆栈检查）
-          sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out LLVM=1 LLVM_IAS=1 olddefconfig' miui-r20.sh
+          # 4. 【核心注入】禁用 kheaders 避免路径报错，同时注入之前的修复
+          # 在生成 defconfig 之后强制关闭不稳定的模块
+          sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_IKHEADERS=y/CONFIG_IKHEADERS=n/g" out/.config\n          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out LLVM=1 LLVM_IAS=1 olddefconfig' miui-r20.sh
 
-          # 7. 运行脚本
-          # 后台监控：一旦 Clang 下载完，立即删掉那个不兼容的 bin/as
+          # 5. 修改 make 命令，保持之前的兼容性修复
+          sed -i 's/make -j$(nproc --all) O=out/make -j$(nproc --all) O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error=int-conversion -Wno-error=implicit-function-declaration -Wno-error=unused-command-line-argument"/g' miui-r20.sh
+          
+          # 6. 工具链后台监控
           (while [ ! -d "/home/runner/clang/bin" ]; do sleep 2; done; rm -f /home/runner/clang/bin/as) &
           
+          # 7. 开启编译
           bash miui-r20.sh
       shell: bash
       env:
@@ -67,7 +63,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Kernel-Build
+        name: Camellia-Built-Kernel
         path: |
           zip/*.zip
           out/arch/arm64/boot/Image*
