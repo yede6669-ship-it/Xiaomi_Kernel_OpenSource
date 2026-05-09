@@ -7,23 +7,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    env:
-      KERNEL_DIR: Xiaomi_Kernel_OpenSource
-
     steps:
     - name: Checkout source
       uses: actions/checkout@v4
       with:
         submodules: true
-
-    - name: Show repository structure
-      run: |
-        echo "=== ROOT ==="
-        pwd
-        ls -al
-
-        echo "=== KERNEL DIR ==="
-        ls -al $KERNEL_DIR
 
     - name: Install dependencies
       run: |
@@ -37,31 +25,59 @@ jobs:
           flex \
           libelf-dev \
           libssl-dev \
-          lld \
-          llvm \
           clang \
+          llvm \
+          lld \
           pahole \
           zip \
           unzip
 
-    - name: Enter kernel source
+    - name: Locate kernel source
       run: |
+        echo "=== SEARCHING KERNEL SOURCE ==="
+
+        find . -name Makefile | head -20
+
+        if [ -f "./Makefile" ] && [ -d "./arch" ]; then
+          KERNEL_DIR="."
+        elif [ -f "./kernel/Makefile" ]; then
+          KERNEL_DIR="./kernel"
+        elif [ -f "./Xiaomi_Kernel_OpenSource/Makefile" ]; then
+          KERNEL_DIR="./Xiaomi_Kernel_OpenSource"
+        else
+          echo "Kernel source not found!"
+          exit 1
+        fi
+
+        echo "KERNEL_DIR=$KERNEL_DIR"
+
+        echo "$KERNEL_DIR" > kernel_dir.txt
+
+    - name: Show kernel tree
+      run: |
+        KERNEL_DIR=$(cat kernel_dir.txt)
+
         cd $KERNEL_DIR
 
         echo "=== CURRENT DIR ==="
         pwd
 
-        echo "=== ARM64 CONFIGS ==="
-        find arch/arm64/configs -type f | sort
+        echo "=== ROOT FILES ==="
+        ls -al
 
-    - name: Fix MTK duplicate symbol issue
+        echo "=== CONFIGS ==="
+        find arch/arm64/configs -type f | head -50
+
+    - name: Fix duplicate symbol issue
       run: |
+        KERNEL_DIR=$(cat kernel_dir.txt)
+
         cd $KERNEL_DIR
 
         FILE="drivers/media/platform/mtk-vcu/Makefile"
 
         if [ -f "$FILE" ]; then
-          echo "=== PATCHING DUPLICATE SYMBOL ISSUE ==="
+          echo "=== PATCHING MTK DUPLICATES ==="
 
           awk '!seen[$0]++' "$FILE" > temp_makefile
 
@@ -70,30 +86,30 @@ jobs:
 
     - name: Detect defconfig
       run: |
+        KERNEL_DIR=$(cat kernel_dir.txt)
+
         cd $KERNEL_DIR
 
-        echo "=== SEARCHING DEFCONFIG ==="
+        echo "=== DETECTING DEFCONFIG ==="
 
-        DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei 'camellia|k69|mt68|vendor' | head -n 1)
+        DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei \
+        'camellia|k69|mt68|vendor|gki' | head -n 1)
 
         echo "FOUND=$DEFCONFIG"
 
         if [ -z "$DEFCONFIG" ]; then
-          echo "No suitable defconfig found."
-
-          find arch/arm64/configs -type f
-
+          echo "No defconfig found!"
           exit 1
         fi
 
-        DEFCONFIG_NAME=$(basename "$DEFCONFIG")
+        basename "$DEFCONFIG" > defconfig_name.txt
 
-        echo "DEFCONFIG_NAME=$DEFCONFIG_NAME"
-
-        echo "$DEFCONFIG_NAME" > defconfig_name.txt
+        echo "DEFCONFIG=$(cat defconfig_name.txt)"
 
     - name: Build kernel
       run: |
+        KERNEL_DIR=$(cat kernel_dir.txt)
+
         cd $KERNEL_DIR
 
         export ARCH=arm64
@@ -103,28 +119,30 @@ jobs:
 
         mkdir -p out
 
-        DEFCONFIG_NAME=$(cat defconfig_name.txt)
+        DEFCONFIG=$(cat defconfig_name.txt)
 
-        echo "=== USING DEFCONFIG ==="
-        echo "$DEFCONFIG_NAME"
+        echo "=== BUILDING WITH ==="
+        echo "$DEFCONFIG"
 
-        make O=out "$DEFCONFIG_NAME"
+        make O=out "$DEFCONFIG"
 
         make -j$(nproc) O=out
 
-    - name: Show outputs
+    - name: Show output
       run: |
+        KERNEL_DIR=$(cat kernel_dir.txt)
+
         cd $KERNEL_DIR
 
-        echo "=== OUTPUT FILES ==="
+        echo "=== BUILD OUTPUT ==="
 
         find out/arch/arm64/boot/ -type f | sort || true
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: camellia-kernel-build
+        name: camellia-kernel
         path: |
-          Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image
-          Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz
-          Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz-dtb
+          **/out/arch/arm64/boot/Image
+          **/out/arch/arm64/boot/Image.gz
+          **/out/arch/arm64/boot/Image.gz-dtb
