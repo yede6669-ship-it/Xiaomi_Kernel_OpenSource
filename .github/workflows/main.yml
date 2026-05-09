@@ -44,7 +44,7 @@ jobs:
         cd $HOME/kernel
         echo "===== 修复 MTK 源码头文件包含问题 ====="
         
-        # 1. 修复之前遇到的 dt_idle_states.h 和 clk-mux.h
+        # 1. 修复通用头文件包含
         find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
           sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
         done
@@ -52,10 +52,9 @@ jobs:
           sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
         done
 
-        # 2. 【新增修复】修复 helio-dvfsrc 系列头文件
-        # 强制将该目录下所有 c 文件对本地头文件的引用改为相对路径引用
-        find drivers/devfreq/helio-dvfsrc-v3/ -type f -name "*.c" -exec sed -i 's/#include <helio-dvfsrc-qos\.h>/#include "helio-dvfsrc-qos.h"/g' {} +
-        find drivers/devfreq/helio-dvfsrc-v3/ -type f -name "*.c" -exec sed -i 's/#include <helio-dvfsrc-v3\.h>/#include "helio-dvfsrc-v3.h"/g' {} +
+        # 2. 【强力修复】批量处理 helio-dvfsrc 目录下的所有本地头文件引用
+        # 只要是 <helio-dvfsrc...h> 全部换成 "helio-dvfsrc...h"
+        find drivers/devfreq/helio-dvfsrc-v3/ -type f -name "*.c" -print0 | xargs -0 sed -i 's/#include <\(helio-dvfsrc[^>]*\.h\)>/#include "\1"/g'
 
         # 3. 建立 mach 软链接
         mkdir -p include/mach
