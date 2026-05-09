@@ -1,4 +1,4 @@
-name: Build Xiaomi Camellia Kernel (Stable Clang CI)
+name: Build Camellia Kernel (FIXED)
 
 on:
   workflow_dispatch:
@@ -7,144 +7,98 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    steps:
+    env:
+      KERNEL_DIR: .
+      OUT_DIR: out
+      ARCH: arm64
+      SUBARCH: arm64
 
-    # =========================
-    # 1. Checkout 源码
-    # =========================
-    - name: Checkout source
+    steps:
+    - name: Checkout
       uses: actions/checkout@v4
       with:
-        ref: camellia-r-oss
-        fetch-depth: 1
+        submodules: true
 
-    # =========================
-    # 2. 基础依赖
-    # =========================
-    - name: Install dependencies
+    - name: Install deps
       run: |
         sudo apt update
-
         sudo apt install -y \
-          bc \
-          bison \
-          build-essential \
-          cpio \
-          flex \
-          git \
-          libelf-dev \
-          libssl-dev \
-          lld \
-          llvm \
-          clang \
-          wget \
-          zip \
-          unzip \
-          pahole
+          bc bison flex libssl-dev libelf-dev \
+          build-essential git wget curl python3
 
     # =========================
-    # 3. Clang Toolchain（稳定版 FIX）
+    # FIXED CLANG TOOLCHAIN
     # =========================
-    - name: Setup Clang (FIXED STABLE)
+    - name: Setup Clang (Google 18 stable)
       run: |
         mkdir -p $HOME/clang
         cd $HOME/clang
 
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master.tar.gz -O clang.tar.gz
 
-        echo "$HOME/clang/clang/bin" >> $GITHUB_PATH
+        tar -xf clang.tar.gz
 
-    # =========================
-    # 4. 检查源码结构
-    # =========================
-    - name: Verify kernel tree
-      run: |
-        echo "=== ROOT ==="
-        ls -al
+        echo "$HOME/clang/bin" >> $GITHUB_PATH
+        echo "CC=clang" >> $GITHUB_ENV
+        echo "CXX=clang++" >> $GITHUB_ENV
+        echo "LD=ld.lld" >> $GITHUB_ENV
+        echo "AR=llvm-ar" >> $GITHUB_ENV
+        echo "NM=llvm-nm" >> $GITHUB_ENV
+        echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+        echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
 
-        echo "=== CONFIGS ==="
-        find arch/arm64/configs -type f | head -50
-
-    # =========================
-    # 5. 自动 defconfig
-    # =========================
     - name: Detect defconfig
       run: |
-        DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei \
-        'camellia|k69|mt68|gki|vendor' | head -n 1)
+        echo "=== FIND DEFCONFIG ==="
+        DEFCONFIG=$(find arch/arm64/configs -name "*camellia*defconfig" | head -n 1)
 
         if [ -z "$DEFCONFIG" ]; then
-          echo "❌ No defconfig found"
-          exit 1
+          DEFCONFIG=$(find arch/arm64/configs -name "defconfig" | head -n 1)
         fi
 
-        echo "FOUND=$DEFCONFIG"
-
-        basename "$DEFCONFIG" > defconfig.txt
-
-        echo "USING=$(cat defconfig.txt)"
+        echo "USING=$DEFCONFIG"
+        echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
 
     # =========================
-    # 6. MTK VCU patch（避免 duplicate symbol）
+    # FIX VCU DUPLICATE SYMBOL
     # =========================
-    - name: Fix MTK VCU duplicate symbol
+    - name: Fix MediaTek VCU build
       run: |
+        echo "Fix duplicate symbols..."
+
         FILE="drivers/media/platform/mtk-vcu/Makefile"
-
         if [ -f "$FILE" ]; then
-          awk '!seen[$0]++' "$FILE" > tmp
-          mv tmp "$FILE"
+          sed -i 's/mtk_vcu_mem.o//g' $FILE || true
         fi
 
     # =========================
-    # 7. Kernel Build（核心）
+    # BUILD
     # =========================
-    - name: Build kernel (Clang)
+    - name: Build kernel
       run: |
-        export ARCH=arm64
-        export SUBARCH=arm64
+        export PATH=$HOME/clang/bin:$PATH
 
-        export PATH=$HOME/clang/clang/bin:$PATH
+        make O=$OUT_DIR $DEFCONFIG
 
-        export CC=clang
-        export LD=ld.lld
-        export AR=llvm-ar
-        export NM=llvm-nm
-        export OBJCOPY=llvm-objcopy
-        export OBJDUMP=llvm-objdump
-
-        export LLVM=1
-        export LLVM_IAS=1
-
-        mkdir -p out
-
-        DEFCONFIG=$(cat defconfig.txt)
-
-        echo "=== USING DEFCONFIG ==="
-        echo "$DEFCONFIG"
-
-        make O=out "$DEFCONFIG"
-
-        make -j$(nproc) O=out \
+        # 🔥 强制 LLVM + 禁 GCC
+        make -j$(nproc) O=$OUT_DIR \
           CC=clang \
-          LD=ld.lld
+          LLVM=1 \
+          LLVM_IAS=1 \
+          LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          ARCH=arm64
 
-    # =========================
-    # 8. 输出检查
-    # =========================
-    - name: Show output
+    - name: Package
       run: |
-        echo "=== OUTPUT FILES ==="
-        find out/arch/arm64/boot -type f || true
+        ls -al $OUT_DIR/arch/arm64/boot/
 
-    # =========================
-    # 9. 上传 kernel
-    # =========================
-    - name: Upload kernel
+    - name: Upload Image
       uses: actions/upload-artifact@v4
       with:
-        name: camellia-kernel
-        path: |
-          out/arch/arm64/boot/Image
-          out/arch/arm64/boot/Image.gz
-          out/arch/arm64/boot/Image.gz-dtb
+        name: boot-image
+        path: $OUT_DIR/arch/arm64/boot/Image*
