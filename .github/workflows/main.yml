@@ -27,9 +27,4 @@ jobs:
           aosp-clang-version: r383902
           disable-lto: true
           anykernel3: true
-       # 满足 Makefile 对 Clang 三元组的所有可能检查
-          extra-make-args: |
-            CLANG_TRIPLE=aarch64-linux-gnu- 
-            CROSS_COMPILE=aarch64-linux-android- 
-            HOSTCC=gcc 
-            HOSTCXX=g++
+      
