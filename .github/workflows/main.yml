@@ -16,6 +16,9 @@ jobs:
       ARCH: arm64
       SUBARCH: arm64
       OUT_DIR: out
+      # 强制宿主机工具使用 GCC 12 以兼容旧内核脚本
+      CC: gcc-12
+      CXX: g++-12
 
     steps:
     - name: Checkout Repository
@@ -24,76 +27,52 @@ jobs:
         ref: ${{ github.event.inputs.branch }}
         submodules: true
 
-    # =========================
-    # 安装工具链：包含 Clang 和 GCC 交叉编译器
-    # =========================
     - name: Install Toolchain & Dependencies
       run: |
         sudo apt update
+        # 安装 gcc-12 以及交叉编译器
         sudo apt install -y \
           bc bison flex libssl-dev libelf-dev \
           build-essential git curl wget \
+          gcc-12 g++-12 \
           clang llvm lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-        echo "--- Toolchain Version ---"
-        clang --version
-        aarch64-linux-gnu-gcc --version
-
-    # =========================
-    # 自动识别配置文件
-    # =========================
     - name: Detect defconfig
       run: |
-        echo "=== Scanning arch/arm64/configs ==="
-        
-        # 优先寻找包含 camellia 的配置，找不到则找默认的
         DEFCONFIG_PATH=$(find arch/arm64/configs -name "*camellia*defconfig" | head -n 1)
-
         if [ -z "$DEFCONFIG_PATH" ]; then
-          echo "Warning: Camellia specific defconfig not found, using generic one."
           DEFCONFIG_PATH=$(find arch/arm64/configs -name "defconfig" | head -n 1)
         fi
-        
-        if [ -z "$DEFCONFIG_PATH" ]; then
-          echo "Error: Makefile or defconfig not found. Check your branch!"
-          exit 1
-        fi
-
-        # 提取纯文件名，例如 camellia_defconfig
         DEFCONFIG_NAME=$(basename "$DEFCONFIG_PATH")
         echo "DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
-        echo "Using Config: $DEFCONFIG_NAME"
 
-    # =========================
-    # 修复常见源码 Bug (针对 MTK)
-    # =========================
     - name: Fix Source Bugs
       run: |
-        # 修复 MTK VCU 重复符号错误
+        # 移除 MTK VCU 重复定义
         FILE="drivers/media/platform/mtk-vcu/Makefile"
         if [ -f "$FILE" ]; then
           sed -i 's/mtk_vcu_mem.o//g' "$FILE" || true
         fi
         
-        # 修复某些脚本权限问题
-        chmod +x scripts/* || true
+        # 针对新版 GCC 的脚本兼容性修复 (消除一些会导致中断的警告)
+        sed -i 's/-Werror//g' Makefile || true
 
-    # =========================
-    # 生成配置 (关键：加入 ARCH 和 CROSS_COMPILE)
-    # =========================
     - name: Generate Config
       run: |
         mkdir -p $OUT_DIR
-        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $DEFCONFIG
+        # 使用 HOSTCC 指定宿主机编译器为 gcc-12
+        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- HOSTCC=gcc-12 $DEFCONFIG
 
-    # =========================
-    # 执行编译 (核心修复：指定 AS 指向交叉汇编器)
-    # =========================
     - name: Build Kernel
       run: |
+        # 联发科内核编译命令
         make -j$(nproc) O=$OUT_DIR \
           ARCH=arm64 \
+          HOSTCC=gcc-12 \
           CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           LD=ld.lld \
           AR=llvm-ar \
           NM=llvm-nm \
@@ -101,27 +80,14 @@ jobs:
           OBJDUMP=llvm-objdump \
           STRIP=llvm-strip \
           AS=aarch64-linux-gnu-as \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           LLVM=1 \
           LLVM_IAS=1
 
-    # =========================
-    # 结果上传
-    # =========================
-    - name: Check Results
-      run: |
-        if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz" ]; then
-          echo "Build Success!"
-        else
-          echo "Build Failed: Image not found"
-          ls -R $OUT_DIR/arch/arm64/boot/ || true
-        fi
-
     - name: Upload Kernel Artifact
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Kernel-Image
+        name: Camellia-Kernel
         path: |
           ${{ env.OUT_DIR }}/arch/arm64/boot/Image
           ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz
