@@ -1,70 +1,115 @@
-name: Aghisna R20 Camellia Final Strike
+name: Build Original Kernel (Camellia)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
+    timeout-minutes: 120
 
     steps:
-    - name: Checkout Source
+    - name: 检出仓库
       uses: actions/checkout@v4
-      with:
-        ref: camellia-r-oss
-        fetch-depth: 1
 
-    - name: Setup Environment
+    - name: 清理磁盘空间
       run: |
-          sudo apt-get update
-          sudo apt-get install -y git make bc bison \
-          openssl curl zip kmod cpio flex libelf-dev \
-          libssl-dev libtfm-dev wget device-tree-compiler \
-          ca-certificates python-is-python3 binutils \
-          binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+        sudo apt-get clean && sudo apt-get autoremove -y
 
-    - name: Build Kernel
+    - name: 安装GCC-8和依赖
       run: |
-          # 1. 结构检查
-          if [ ! -f "Makefile" ]; then
-            M_PATH=$(find . -name "Makefile" -printf '%h' -quit)
-            [ -n "$M_PATH" ] && cp -af $M_PATH/. .
-          fi
+        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+        sudo apt update
+        # 增加 libelf-dev 和 cpio，这是原版内核链接时必需的
+        sudo apt install -y gcc-8 g++-8 gcc-8-aarch64-linux-gnu g++-8-aarch64-linux-gnu \
+          bc bison build-essential curl flex git libssl-dev libelf-dev \
+          wget python3 device-tree-compiler libncurses5-dev make cpio
 
-          # 2. 下载并初始化脚本
-          curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
-          chmod +x miui-r20.sh
-          rm -rf /home/runner/clang 
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
 
-          # 3. 适配脚本参数
-          sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
-          sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
-          sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
-          sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
+    - name: 下载源码
+      run: |
+        cd $HOME
+        wget -q --show-progress \
+          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
+          -O kernel.zip
+        unzip -q kernel.zip
+        mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
+        rm kernel.zip
 
-          # 4. 【核心注入】禁用 kheaders 避免路径报错，同时注入之前的修复
-          # 在生成 defconfig 之后强制关闭不稳定的模块
-          sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_IKHEADERS=y/CONFIG_IKHEADERS=n/g" out/.config\n          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out LLVM=1 LLVM_IAS=1 olddefconfig' miui-r20.sh
+    - name: 修复内核源码问题
+      run: |
+        cd $HOME/kernel
+        echo "===== 修复 MTK 源码头文件问题 ====="
+        # 修复 dt_idle_states.h 等本地包含路径
+        find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
+          sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
+        done
 
-          # 5. 修改 make 命令，保持之前的兼容性修复
-          sed -i 's/make -j$(nproc --all) O=out/make -j$(nproc --all) O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error=int-conversion -Wno-error=implicit-function-declaration -Wno-error=unused-command-line-argument"/g' miui-r20.sh
-          
-          # 6. 工具链后台监控
-          (while [ ! -d "/home/runner/clang/bin" ]; do sleep 2; done; rm -f /home/runner/clang/bin/as) &
-          
-          # 7. 开启编译
-          bash miui-r20.sh
-      shell: bash
-      env:
-         CHATID: ${{ secrets.CHAT_ID }}
-         API_BOT: ${{ secrets.BOT_API }}
+        find drivers/clk -type f -name "*.c" -exec grep -l "clk-mux.h" {} \; | while read file; do
+          sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
+        done
 
-    - name: Upload Result
-      if: always()
+        # 建立机器路径符号链接，防止某些驱动找不到 mach 目录
+        mkdir -p include/mach
+        ln -sf $(pwd)/drivers/misc/mediatek/include/mt-plat/include/mach include/mach
+
+    - name: 配置内核
+      run: |
+        cd $HOME/kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        make camellia_defconfig
+
+        # 禁用不稳定的调试功能，确保纯净原版能跑通
+        sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g' .config
+        # 之前报错的 kheaders 建议在原版中也关闭，除非你必须用到它
+        echo "CONFIG_IKHEADERS=n" >> .config
+        
+        make olddefconfig
+
+    - name: 编译内核
+      run: |
+        cd $HOME/kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=aarch64-linux-gnu-gcc-8
+        export HOSTCC=gcc-8
+        export HOSTCXX=g++-8
+        export KCFLAGS="-w"
+
+        echo "===== 开始编译原版 Image.gz-dtb ====="
+        make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
+          echo "编译失败，最后 100 行日志："
+          tail -n 100 build.log
+          exit 1
+        }
+
+    - name: 整理产物
+      run: |
+        mkdir -p output
+        if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
+          cp "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" output/
+          echo "✅ 原版内核编译成功"
+        fi
+
+    - name: 上传产物
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Built-Kernel
-        path: |
-          zip/*.zip
-          out/arch/arm64/boot/Image*
-          out/arch/arm64/boot/dtbo.img
+        name: Original-Kernel-Camellia
+        path: output/
+
+    - name: 生成摘要
+      run: |
+        echo "# 📦 原版内核构建完成" >> $GITHUB_STEP_SUMMARY
+        if [ -f "output/Image.gz-dtb" ]; then
+          echo "- 状态: 成功" >> $GITHUB_STEP_SUMMARY
+          echo "- 机型: Redmi Note 10 5G (camellia)" >> $GITHUB_STEP_SUMMARY
+          echo "- 大小: $(ls -lh output/Image.gz-dtb | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- 状态: 失败" >> $GITHUB_STEP_SUMMARY
+        fi
