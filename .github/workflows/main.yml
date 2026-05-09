@@ -18,14 +18,14 @@ jobs:
           kernel-url: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
           kernel-dir: msm-4.14
           kernel-branch: camellia-r-oss
-          config: k6833v1_64_defconfig
+          # 就在这里！利用 $(...) 在执行 config 之前强行删掉报错行
+          config: $(sed -i 's/$(error "Clang with Android --target detected. Did you specify CLANG_TRIPLE?").*//g' Makefile) k6833v1_64_defconfig
           arch: arm64
           aosp-gcc: true
           aosp-clang: true
-         
           android-version: 11
           aosp-clang-version: r383902
           disable-lto: true
           anykernel3: true
-          
-          extra-make-args: $(sed -i 's/$(error "Clang with Android --target detected. Did you specify CLANG_TRIPLE?").*//g' Makefile) CLANG_TRIPLE=aarch64-linux-gnu-
+          # 依然保留这个，防止 Makefile 其他地方也检查这个变量
+          extra-make-args: CLANG_TRIPLE=aarch64-linux-gnu-
