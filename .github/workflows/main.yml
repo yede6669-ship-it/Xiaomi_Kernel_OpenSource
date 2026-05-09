@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: '请输入你要编译的内核分支 (如 camellia-r-oss 或 camellia-s-oss)'
+        description: '内核分支 (请确保分支内有 Makefile)'
         required: true
-        default: 'camellia-r-oss' # 根据你的仓库实际存在的山茶花分支名修改
+        default: 'camellia-r-oss'
 
 jobs:
   build:
@@ -21,11 +21,11 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.inputs.branch }} # 确保检出包含源码的正确分支
+        ref: ${{ github.event.inputs.branch }}
         submodules: true
 
     # =========================
-    # 安装编译工具链 (包含交叉编译所需依赖)
+    # 安装工具链：包含 Clang 和 GCC 交叉编译器
     # =========================
     - name: Install Toolchain & Dependencies
       run: |
@@ -35,59 +35,62 @@ jobs:
           build-essential git curl wget \
           clang llvm lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
+        echo "--- Toolchain Version ---"
         clang --version
-        ld.lld --version
+        aarch64-linux-gnu-gcc --version
 
     # =========================
-    # 查找并提取真实的 DEFCONFIG 名字
+    # 自动识别配置文件
     # =========================
     - name: Detect defconfig
       run: |
-        echo "=== scanning defconfigs ==="
+        echo "=== Scanning arch/arm64/configs ==="
         
-        # 查找配置文件的完整路径
+        # 优先寻找包含 camellia 的配置，找不到则找默认的
         DEFCONFIG_PATH=$(find arch/arm64/configs -name "*camellia*defconfig" | head -n 1)
 
         if [ -z "$DEFCONFIG_PATH" ]; then
-          echo "Warning: Camellia defconfig not found, falling back to standard defconfig"
+          echo "Warning: Camellia specific defconfig not found, using generic one."
           DEFCONFIG_PATH=$(find arch/arm64/configs -name "defconfig" | head -n 1)
         fi
         
         if [ -z "$DEFCONFIG_PATH" ]; then
-          echo "Error: No defconfig found. Kernel source might be incomplete!"
+          echo "Error: Makefile or defconfig not found. Check your branch!"
           exit 1
         fi
 
-        # 核心修复: 提取纯文件名 (比如从 arch/... 提取出 camellia_defconfig)
+        # 提取纯文件名，例如 camellia_defconfig
         DEFCONFIG_NAME=$(basename "$DEFCONFIG_PATH")
-
-        echo "Found path: $DEFCONFIG_PATH"
-        echo "Using target: $DEFCONFIG_NAME"
         echo "DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
+        echo "Using Config: $DEFCONFIG_NAME"
 
     # =========================
-    # 修复 MTK VCU 符号重复 BUG
+    # 修复常见源码 Bug (针对 MTK)
     # =========================
-    - name: Fix MTK VCU duplicate symbol
+    - name: Fix Source Bugs
       run: |
+        # 修复 MTK VCU 重复符号错误
         FILE="drivers/media/platform/mtk-vcu/Makefile"
         if [ -f "$FILE" ]; then
-          echo "Patching VCU Makefile..."
           sed -i 's/mtk_vcu_mem.o//g' "$FILE" || true
         fi
+        
+        # 修复某些脚本权限问题
+        chmod +x scripts/* || true
 
     # =========================
-    # 生成配置与编译
+    # 生成配置 (关键：加入 ARCH 和 CROSS_COMPILE)
     # =========================
-    - name: Generate Defconfig
+    - name: Generate Config
       run: |
         mkdir -p $OUT_DIR
-        # 核心修复: 生成配置时必须带上 ARCH=arm64，否则系统会按 x86 处理
-        make O=$OUT_DIR ARCH=arm64 $DEFCONFIG
+        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- $DEFCONFIG
 
-    - name: Build kernel
+    # =========================
+    # 执行编译 (核心修复：指定 AS 指向交叉汇编器)
+    # =========================
+    - name: Build Kernel
       run: |
-        # MTK 的 4.14/4.19 内核使用 Clang 时通常也需要提供 GCC 交叉编译环境变量供汇编器使用
         make -j$(nproc) O=$OUT_DIR \
           ARCH=arm64 \
           CC=clang \
@@ -97,20 +100,29 @@ jobs:
           OBJCOPY=llvm-objcopy \
           OBJDUMP=llvm-objdump \
           STRIP=llvm-strip \
+          AS=aarch64-linux-gnu-as \
           CROSS_COMPILE=aarch64-linux-gnu- \
           CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           LLVM=1 \
           LLVM_IAS=1
 
     # =========================
-    # 输出与上传
+    # 结果上传
     # =========================
-    - name: Check Output
+    - name: Check Results
       run: |
-        ls -al $OUT_DIR/arch/arm64/boot/ || echo "Kernel boot output directory not found"
+        if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz" ]; then
+          echo "Build Success!"
+        else
+          echo "Build Failed: Image not found"
+          ls -R $OUT_DIR/arch/arm64/boot/ || true
+        fi
 
-    - name: Upload Image
+    - name: Upload Kernel Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: camellia-kernel-image
-        path: ${{ env.OUT_DIR }}/arch/arm64/boot/Image*
+        name: Camellia-Kernel-Image
+        path: |
+          ${{ env.OUT_DIR }}/arch/arm64/boot/Image
+          ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz
+          ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz-dtb
