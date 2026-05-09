@@ -14,7 +14,6 @@ jobs:
 
     - name: 安装GCC-8和依赖
       run: |
-        # 添加 Ubuntu 20.04 源以获取 GCC-8
         echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal main universe" | sudo tee -a /etc/apt/sources.list
         echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal-updates main universe" | sudo tee -a /etc/apt/sources.list
         
@@ -23,15 +22,12 @@ jobs:
           bc bison build-essential curl flex git libssl-dev libelf-dev \
           wget python3 device-tree-compiler libncurses5-dev make cpio
 
-        # 设置本地 GCC 优先级
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
 
-        # 【关键修复】创建交叉编译器的软链接，解决 No such file 报错
-        # 将带版本号的编译器链接到内核 Makefile 默认寻找的名字上
+        # 创建交叉编译器软链接
         sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc-8 /usr/bin/aarch64-linux-gnu-gcc
         sudo ln -sf /usr/bin/aarch64-linux-gnu-g++-8 /usr/bin/aarch64-linux-gnu-g++
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-cpp-8 /usr/bin/aarch64-linux-gnu-cpp
 
     - name: 下载源码
       run: |
@@ -46,15 +42,22 @@ jobs:
     - name: 修复内核源码问题
       run: |
         cd $HOME/kernel
-        echo "===== 修复 MTK 源码头文件问题 ====="
+        echo "===== 修复 MTK 源码头文件包含问题 ====="
+        
+        # 1. 修复之前遇到的 dt_idle_states.h 和 clk-mux.h
         find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
           sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
         done
-
         find drivers/clk -type f -name "*.c" -exec grep -l "clk-mux.h" {} \; | while read file; do
           sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
         done
 
+        # 2. 【新增修复】修复 helio-dvfsrc 系列头文件
+        # 强制将该目录下所有 c 文件对本地头文件的引用改为相对路径引用
+        find drivers/devfreq/helio-dvfsrc-v3/ -type f -name "*.c" -exec sed -i 's/#include <helio-dvfsrc-qos\.h>/#include "helio-dvfsrc-qos.h"/g' {} +
+        find drivers/devfreq/helio-dvfsrc-v3/ -type f -name "*.c" -exec sed -i 's/#include <helio-dvfsrc-v3\.h>/#include "helio-dvfsrc-v3.h"/g' {} +
+
+        # 3. 建立 mach 软链接
         mkdir -p include/mach
         ln -sf $(pwd)/drivers/misc/mediatek/include/mt-plat/include/mach include/mach
 
@@ -74,7 +77,6 @@ jobs:
         cd $HOME/kernel
         export ARCH=arm64
         export SUBARCH=arm64
-        # 显式指定交叉编译前缀
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CC=aarch64-linux-gnu-gcc
         export HOSTCC=gcc
