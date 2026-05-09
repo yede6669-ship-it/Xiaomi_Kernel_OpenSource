@@ -1,7 +1,12 @@
-name: Stable Xiaomi Kernel Build
+name: Stable Xiaomi Kernel Build (Camellia)
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: '请输入你要编译的内核分支 (如 camellia-r-oss 或 camellia-s-oss)'
+        required: true
+        default: 'camellia-r-oss' # 根据你的仓库实际存在的山茶花分支名修改
 
 jobs:
   build:
@@ -10,82 +15,102 @@ jobs:
     env:
       ARCH: arm64
       SUBARCH: arm64
-      KERNEL_DIR: .
       OUT_DIR: out
 
     steps:
-    - name: Checkout
+    - name: Checkout Repository
       uses: actions/checkout@v4
       with:
+        ref: ${{ github.event.inputs.branch }} # 确保检出包含源码的正确分支
         submodules: true
 
     # =========================
-    # INSTALL TOOLCHAIN (SAFE)
+    # 安装编译工具链 (包含交叉编译所需依赖)
     # =========================
-    - name: Install LLVM (stable system)
+    - name: Install Toolchain & Dependencies
       run: |
         sudo apt update
         sudo apt install -y \
           bc bison flex libssl-dev libelf-dev \
           build-essential git curl wget \
-          clang llvm lld
+          clang llvm lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
         clang --version
         ld.lld --version
 
     # =========================
-    # FIND DEFCONFIG
+    # 查找并提取真实的 DEFCONFIG 名字
     # =========================
     - name: Detect defconfig
       run: |
         echo "=== scanning defconfigs ==="
+        
+        # 查找配置文件的完整路径
+        DEFCONFIG_PATH=$(find arch/arm64/configs -name "*camellia*defconfig" | head -n 1)
 
-        DEFCONFIG=$(find arch/arm64/configs -name "*camellia*defconfig" | head -n 1)
-
-        if [ -z "$DEFCONFIG" ]; then
-          DEFCONFIG=$(find arch/arm64/configs -name "defconfig" | head -n 1)
+        if [ -z "$DEFCONFIG_PATH" ]; then
+          echo "Warning: Camellia defconfig not found, falling back to standard defconfig"
+          DEFCONFIG_PATH=$(find arch/arm64/configs -name "defconfig" | head -n 1)
+        fi
+        
+        if [ -z "$DEFCONFIG_PATH" ]; then
+          echo "Error: No defconfig found. Kernel source might be incomplete!"
+          exit 1
         fi
 
-        echo "Using: $DEFCONFIG"
-        echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
+        # 核心修复: 提取纯文件名 (比如从 arch/... 提取出 camellia_defconfig)
+        DEFCONFIG_NAME=$(basename "$DEFCONFIG_PATH")
+
+        echo "Found path: $DEFCONFIG_PATH"
+        echo "Using target: $DEFCONFIG_NAME"
+        echo "DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
 
     # =========================
-    # FIX MTK VCU DUPLICATE BUG
+    # 修复 MTK VCU 符号重复 BUG
     # =========================
     - name: Fix MTK VCU duplicate symbol
       run: |
         FILE="drivers/media/platform/mtk-vcu/Makefile"
-
         if [ -f "$FILE" ]; then
           echo "Patching VCU Makefile..."
-          sed -i 's/mtk_vcu_mem.o//g' $FILE || true
+          sed -i 's/mtk_vcu_mem.o//g' "$FILE" || true
         fi
 
     # =========================
-    # BUILD
+    # 生成配置与编译
     # =========================
-    - name: Build kernel
+    - name: Generate Defconfig
       run: |
         mkdir -p $OUT_DIR
+        # 核心修复: 生成配置时必须带上 ARCH=arm64，否则系统会按 x86 处理
+        make O=$OUT_DIR ARCH=arm64 $DEFCONFIG
 
-        make O=$OUT_DIR $DEFCONFIG
-
+    - name: Build kernel
+      run: |
+        # MTK 的 4.14/4.19 内核使用 Clang 时通常也需要提供 GCC 交叉编译环境变量供汇编器使用
         make -j$(nproc) O=$OUT_DIR \
           ARCH=arm64 \
           CC=clang \
           LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          STRIP=llvm-strip \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           LLVM=1 \
           LLVM_IAS=1
 
     # =========================
-    # RESULT
+    # 输出与上传
     # =========================
-    - name: Show output
+    - name: Check Output
       run: |
-        ls -al $OUT_DIR/arch/arm64/boot/
+        ls -al $OUT_DIR/arch/arm64/boot/ || echo "Kernel boot output directory not found"
 
     - name: Upload Image
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-image
-        path: $OUT_DIR/arch/arm64/boot/Image*
+        name: camellia-kernel-image
+        path: ${{ env.OUT_DIR }}/arch/arm64/boot/Image*
