@@ -1,4 +1,4 @@
-name: Build Xiaomi Camellia Kernel (Stable Clang)
+name: Build Xiaomi Camellia Kernel (Stable Clang CI)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     steps:
 
     # =========================
-    # 1. 拉源码（固定分支）
+    # 1. Checkout 源码
     # =========================
     - name: Checkout source
       uses: actions/checkout@v4
@@ -43,21 +43,19 @@ jobs:
           pahole
 
     # =========================
-    # 3. Clang 工具链（稳定版）
+    # 3. Clang Toolchain（稳定版 FIX）
     # =========================
-    - name: Setup Clang toolchain
+    - name: Setup Clang (FIXED STABLE)
       run: |
         mkdir -p $HOME/clang
         cd $HOME/clang
 
-        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master.tar.gz -O clang.tar.gz
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-        tar -xf clang.tar.gz
-
-        echo "$HOME/clang/bin" >> $GITHUB_PATH
+        echo "$HOME/clang/clang/bin" >> $GITHUB_PATH
 
     # =========================
-    # 4. 检查源码
+    # 4. 检查源码结构
     # =========================
     - name: Verify kernel tree
       run: |
@@ -65,10 +63,10 @@ jobs:
         ls -al
 
         echo "=== CONFIGS ==="
-        find arch/arm64/configs -type f
+        find arch/arm64/configs -type f | head -50
 
     # =========================
-    # 5. 自动选择 defconfig
+    # 5. 自动 defconfig
     # =========================
     - name: Detect defconfig
       run: |
@@ -87,9 +85,9 @@ jobs:
         echo "USING=$(cat defconfig.txt)"
 
     # =========================
-    # 6. 修 MTK VCU（避免 duplicate symbol）
+    # 6. MTK VCU patch（避免 duplicate symbol）
     # =========================
-    - name: Fix MTK VCU build issue
+    - name: Fix MTK VCU duplicate symbol
       run: |
         FILE="drivers/media/platform/mtk-vcu/Makefile"
 
@@ -99,12 +97,14 @@ jobs:
         fi
 
     # =========================
-    # 7. 编译 kernel（核心修复点）
+    # 7. Kernel Build（核心）
     # =========================
     - name: Build kernel (Clang)
       run: |
         export ARCH=arm64
         export SUBARCH=arm64
+
+        export PATH=$HOME/clang/clang/bin:$PATH
 
         export CC=clang
         export LD=ld.lld
@@ -120,7 +120,7 @@ jobs:
 
         DEFCONFIG=$(cat defconfig.txt)
 
-        echo "=== BUILD DEFCONFIG ==="
+        echo "=== USING DEFCONFIG ==="
         echo "$DEFCONFIG"
 
         make O=out "$DEFCONFIG"
@@ -132,13 +132,13 @@ jobs:
     # =========================
     # 8. 输出检查
     # =========================
-    - name: Show build output
+    - name: Show output
       run: |
-        echo "=== OUTPUT ==="
+        echo "=== OUTPUT FILES ==="
         find out/arch/arm64/boot -type f || true
 
     # =========================
-    # 9. 上传产物
+    # 9. 上传 kernel
     # =========================
     - name: Upload kernel
       uses: actions/upload-artifact@v4
