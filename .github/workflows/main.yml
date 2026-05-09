@@ -1,4 +1,4 @@
-name: Aghisna R20 Camellia Build
+name: Aghisna R20 Camellia Special Fix
 
 on:
   workflow_dispatch:
@@ -10,6 +10,8 @@ jobs:
     steps:
     - name: Checkout Source
       uses: actions/checkout@v4
+      with:
+        ref: camellia-r-oss # 强制指定你的分支
 
     - name: Setup Environment
       run: |
@@ -22,39 +24,42 @@ jobs:
 
     - name: Build Kernel
       run: |
-          # 1. 下载脚本
+          # 1. 核心修复：将 arch/arm64 里的所有内容移动到根目录
+          # 因为你的仓库把 Makefile 等关键文件全放在了这里面
+          echo "正在重新整理源码结构..."
+          cp -af arch/arm64/* .
+          
+          # 2. 下载编译脚本
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 2. 修改脚本参数以适配你的机型
-          # 将默认的 Pro 机型改为你的 5G 版机型
+          # 3. 适配红米Note 10 5G (Camellia) 参数
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
+          # 注意：你的配置文件可能叫 camellia_defconfig 或 camellia_gl_defconfig
+          # 我们先统一尝试 camellia_defconfig
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
           
-          # 3. 核心修复：阻止编译完成后自动删除文件夹（否则你下载不到产物）
+          # 4. 阻止自动删除 (以便上传产物)
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
           
-          # 4. 修复联发科 MTK 源码在 GitHub 环境下的堆栈保护报错
-          # 在脚本执行 make $DEFCONFIG 之后立即注入禁用命令
+          # 5. 注入联发科 MTK 堆栈保护补丁
+          # 修复 CONFIG_CC_STACKPROTECTOR_STRONG 导致的编译中断
           sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out olddefconfig' miui-r20.sh
 
-          # 5. 执行编译
+          # 6. 开始编译
           bash miui-r20.sh
       shell: bash
       env:
          CHATID: ${{ secrets.CHAT_ID }}
          API_BOT: ${{ secrets.BOT_API }}
-         TYPE_KERNEL: "Camellia-OSS"
 
-    - name: Upload Kernel Artifact
+    - name: Upload Camellia Results
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Kernel-Package
-        # 捕获所有可能的产物
+        name: Camellia-Kernel-Final
         path: |
           zip/*.zip
           out/arch/arm64/boot/Image*
           out/arch/arm64/boot/dtbo.img
-          error.log
