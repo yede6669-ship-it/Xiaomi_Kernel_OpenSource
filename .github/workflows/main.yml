@@ -27,5 +27,4 @@ jobs:
           aosp-clang-version: r383902
           disable-lto: true
           anykernel3: true
-          extra-cmd: |          
-            sed -i 's/$(error "Clang with Android --target detected. Did you specify CLANG_TRIPLE?").*//g' Makefile
+         extra-make-args: CLANG_TRIPLE=aarch64-linux-gnu-
