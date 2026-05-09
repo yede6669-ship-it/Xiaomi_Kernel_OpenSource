@@ -1,4 +1,4 @@
-name: Build Camellia Kernel (FIXED)
+name: Stable Xiaomi Kernel Build
 
 on:
   workflow_dispatch:
@@ -8,10 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      KERNEL_DIR: .
-      OUT_DIR: out
       ARCH: arm64
       SUBARCH: arm64
+      KERNEL_DIR: .
+      OUT_DIR: out
 
     steps:
     - name: Checkout
@@ -19,55 +19,45 @@ jobs:
       with:
         submodules: true
 
-    - name: Install deps
+    # =========================
+    # INSTALL TOOLCHAIN (SAFE)
+    # =========================
+    - name: Install LLVM (stable system)
       run: |
         sudo apt update
         sudo apt install -y \
           bc bison flex libssl-dev libelf-dev \
-          build-essential git wget curl python3
+          build-essential git curl wget \
+          clang llvm lld
+
+        clang --version
+        ld.lld --version
 
     # =========================
-    # FIXED CLANG TOOLCHAIN
+    # FIND DEFCONFIG
     # =========================
-    - name: Setup Clang (Google 18 stable)
-      run: |
-        mkdir -p $HOME/clang
-        cd $HOME/clang
-
-        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master.tar.gz -O clang.tar.gz
-
-        tar -xf clang.tar.gz
-
-        echo "$HOME/clang/bin" >> $GITHUB_PATH
-        echo "CC=clang" >> $GITHUB_ENV
-        echo "CXX=clang++" >> $GITHUB_ENV
-        echo "LD=ld.lld" >> $GITHUB_ENV
-        echo "AR=llvm-ar" >> $GITHUB_ENV
-        echo "NM=llvm-nm" >> $GITHUB_ENV
-        echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-        echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
-
     - name: Detect defconfig
       run: |
-        echo "=== FIND DEFCONFIG ==="
+        echo "=== scanning defconfigs ==="
+
         DEFCONFIG=$(find arch/arm64/configs -name "*camellia*defconfig" | head -n 1)
 
         if [ -z "$DEFCONFIG" ]; then
           DEFCONFIG=$(find arch/arm64/configs -name "defconfig" | head -n 1)
         fi
 
-        echo "USING=$DEFCONFIG"
+        echo "Using: $DEFCONFIG"
         echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
 
     # =========================
-    # FIX VCU DUPLICATE SYMBOL
+    # FIX MTK VCU DUPLICATE BUG
     # =========================
-    - name: Fix MediaTek VCU build
+    - name: Fix MTK VCU duplicate symbol
       run: |
-        echo "Fix duplicate symbols..."
-
         FILE="drivers/media/platform/mtk-vcu/Makefile"
+
         if [ -f "$FILE" ]; then
+          echo "Patching VCU Makefile..."
           sed -i 's/mtk_vcu_mem.o//g' $FILE || true
         fi
 
@@ -76,29 +66,26 @@ jobs:
     # =========================
     - name: Build kernel
       run: |
-        export PATH=$HOME/clang/bin:$PATH
+        mkdir -p $OUT_DIR
 
         make O=$OUT_DIR $DEFCONFIG
 
-        # 🔥 强制 LLVM + 禁 GCC
         make -j$(nproc) O=$OUT_DIR \
+          ARCH=arm64 \
           CC=clang \
-          LLVM=1 \
-          LLVM_IAS=1 \
           LD=ld.lld \
-          AR=llvm-ar \
-          NM=llvm-nm \
-          OBJCOPY=llvm-objcopy \
-          OBJDUMP=llvm-objdump \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          ARCH=arm64
+          LLVM=1 \
+          LLVM_IAS=1
 
-    - name: Package
+    # =========================
+    # RESULT
+    # =========================
+    - name: Show output
       run: |
         ls -al $OUT_DIR/arch/arm64/boot/
 
     - name: Upload Image
       uses: actions/upload-artifact@v4
       with:
-        name: boot-image
+        name: kernel-image
         path: $OUT_DIR/arch/arm64/boot/Image*
