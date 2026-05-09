@@ -27,42 +27,42 @@ jobs:
       run: |
           # 1. 结构重组：确保 Makefile 位于根目录
           if [ ! -f "Makefile" ]; then
-            echo "Makefile not found in root, searching..."
             M_PATH=$(find . -name "Makefile" -printf '%h' -quit)
-            if [ -n "$M_PATH" ]; then
-                echo "Found Makefile in $M_PATH, moving everything to root..."
-                cp -af $M_PATH/. .
-            fi
+            [ -n "$M_PATH" ] && cp -af $M_PATH/. .
           fi
 
-          # 2. 【核心修复】强制修改全局 Makefile
-          # 直接在 Makefile 开头注入 LLVM 标志，强制所有子模块使用集成汇编器
-          # 这能从根本上解决 -EL 报错问题
-          sed -i '1i LLVM := 1' Makefile
-          sed -i '1i LLVM_IAS := 1' Makefile
-
-          # 3. 下载并适配编译脚本
+          # 2. 下载编译脚本
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 适配红米Note 10 5G (Camellia) 
+          # 3. 运行脚本前的预处理：下载 Clang
+          # 脚本内部会下载 clang 到 /home/runner/clang
+          # 我们先手动触发一次脚本里的下载逻辑，或者直接等它下载完
+          bash miui-r20.sh & sleep 60 && kill $! || true
+
+          # 4. 【核心修复】强力移除不兼容的汇编器
+          # 删掉 clang 目录下的 as，强制它使用系统的 aarch64-linux-gnu-as
+          echo "Removing problematic assembler..."
+          rm -rf /home/runner/clang/bin/as
+          rm -rf /home/runner/clang/bin/aarch64-linux-gnu-as
+          rm -rf /home/runner/clang/bin/arm-linux-gnueabi-as
+
+          # 5. 修改全局 Makefile
+          sed -i '1i LLVM := 1' Makefile
+          sed -i '1i LLVM_IAS := 1' Makefile
+
+          # 6. 适配机型参数并禁用清理
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
-          
-          # 4. 阻止脚本乱删文件夹
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
           
-          # 5. 注入 MTK 专项补丁 (解决堆栈保护报错)
-          # 在执行 make defconfig 之后强制修改 .config 并刷新
+          # 7. 注入 MTK 堆栈补丁
           sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out LLVM=1 LLVM_IAS=1 olddefconfig' miui-r20.sh
           
-          # 6. 强力执行：手动补全工具链环境变量
+          # 8. 强力执行
           export PATH="/home/runner/clang/bin:$PATH"
-          export LD_LIBRARY_PATH="/home/runner/clang/lib:$LD_LIBRARY_PATH"
-          
-          # 运行脚本，并再次显式传入 LLVM 标志
-          bash miui-r20.sh LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          bash miui-r20.sh LLVM=1 LLVM_IAS=1
       shell: bash
       env:
          CHATID: ${{ secrets.CHAT_ID }}
@@ -77,4 +77,3 @@ jobs:
           zip/*.zip
           out/arch/arm64/boot/Image*
           out/arch/arm64/boot/dtbo.img
-          error.log
