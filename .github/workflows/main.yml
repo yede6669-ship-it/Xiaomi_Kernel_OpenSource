@@ -1,4 +1,4 @@
-name: Aghisna R20 Camellia Special Fix
+name: Aghisna R20 Camellia Final Fix
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     - name: Checkout Source
       uses: actions/checkout@v4
       with:
-        ref: camellia-r-oss # 强制指定你的分支
+        ref: camellia-r-oss
 
     - name: Setup Environment
       run: |
@@ -22,44 +22,53 @@ jobs:
           ca-certificates python-is-python3 binutils \
           binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-    - name: Build Kernel
+    - name: Rearrange and Build
       run: |
-          # 1. 核心修复：将 arch/arm64 里的所有内容移动到根目录
-          # 因为你的仓库把 Makefile 等关键文件全放在了这里面
-          echo "正在重新整理源码结构..."
-          cp -af arch/arm64/* .
+          # 1. 结构大重组 (核心步骤)
+          # 你的仓库目前是：arch/arm64/[所有源码]
+          # 我们把它们全部拷贝到根目录，让它变成一个标准的内核工程
+          echo "正在强行修复源码结构..."
+          cp -af arch/arm64/* . 
           
-          # 2. 下载编译脚本
+          # 2. 检查 Makefile 是否已经出现在根目录
+          if [ -f "Makefile" ]; then
+            echo "Makefile 提取成功，开始准备编译脚本..."
+          else
+            echo "错误：即使在 arch/arm64/ 下也找不到 Makefile！"
+            ls -R arch/arm64/ | head -n 20
+            exit 1
+          fi
+
+          # 3. 下载脚本并进行 Camellia 适配
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 3. 适配红米Note 10 5G (Camellia) 参数
+          # 修改机型和配置文件名
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
-          # 注意：你的配置文件可能叫 camellia_defconfig 或 camellia_gl_defconfig
-          # 我们先统一尝试 camellia_defconfig
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
           
-          # 4. 阻止自动删除 (以便上传产物)
+          # 4. 禁用脚本自带的清理功能 (防止删掉我们刚刚移动的文件)
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
           
-          # 5. 注入联发科 MTK 堆栈保护补丁
-          # 修复 CONFIG_CC_STACKPROTECTOR_STRONG 导致的编译中断
+          # 5. 注入补丁：解决联发科源码在 GitHub Actions 上的报错
+          # 在执行 make $DEFCONFIG 后强制关掉堆栈保护
           sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out olddefconfig' miui-r20.sh
 
-          # 6. 开始编译
+          # 6. 执行编译
           bash miui-r20.sh
       shell: bash
       env:
          CHATID: ${{ secrets.CHAT_ID }}
          API_BOT: ${{ secrets.BOT_API }}
 
-    - name: Upload Camellia Results
+    - name: Upload Camellia Artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Kernel-Final
+        name: Camellia-Built-Kernel
         path: |
           zip/*.zip
           out/arch/arm64/boot/Image*
           out/arch/arm64/boot/dtbo.img
+          error.log
