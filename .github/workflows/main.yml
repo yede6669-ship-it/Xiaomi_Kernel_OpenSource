@@ -1,4 +1,4 @@
-name: Aghisna R20 (Camellia Optimized)
+name: Aghisna R20 (Camellia Path Final Fix)
 
 on:
   workflow_dispatch:
@@ -22,30 +22,40 @@ jobs:
 
     - name: Ready Compile
       run: |
-          # 1. 处理目录嵌套问题
-          # 你的源码在 Xiaomi_Kernel_OpenSource-camellia-r-oss/ 下
-          # 我们把所有内容移动到当前根目录，确保脚本能找到 Makefile
-          if [ -d "Xiaomi_Kernel_OpenSource-camellia-r-oss" ]; then
-            mv Xiaomi_Kernel_OpenSource-camellia-r-oss/* .
+          # 1. 深度清理和路径校正
+          # 查找真正的 Makefile 所在目录
+          MAKE_PATH=$(find . -maxdepth 3 -name "Makefile" -printf '%h' -quit)
+          echo "Found Makefile in: $MAKE_PATH"
+          
+          # 如果 Makefile 不在当前根目录，则将该目录下的所有内容移动到根目录
+          if [ "$MAKE_PATH" != "." ]; then
+            echo "Moving source from $MAKE_PATH to root..."
+            cp -r $MAKE_PATH/* .
           fi
 
-          # 2. 下载并配置编译脚本
+          # 2. 下载并注入脚本
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 3. 自动适配 Camellia 机型参数
+          # 3. 强制适配 Camellia (红米Note 10 5G)
+          # 检查是否存在 camellia_defconfig，如果不存在则报错提醒
+          if [ ! -f "arch/arm64/configs/camellia_defconfig" ]; then
+            echo "ERROR: camellia_defconfig not found in arch/arm64/configs/"
+            ls arch/arm64/configs/
+            exit 1
+          fi
+
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
-          # 优先尝试 camellia_defconfig
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
           
-          # 4. 修复联发科(MTK)编译报错 & 阻止自动删除
+          # 4. 修复 MTK 编译报错 & 阻止自动删除
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
           
-          # 关键：在脚本生成配置后，强制禁用导致报错的堆栈保护检查
-          sed -i '/make "$DEFCONFIG" O=out/a \sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\nmake O=out olddefconfig' miui-r20.sh
+          # 关键点：在脚本内 make $DEFCONFIG 之后精确插入补丁
+          sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out olddefconfig' miui-r20.sh
 
-          # 5. 开始编译
+          # 5. 启动编译
           bash miui-r20.sh
       shell: bash
       env:
@@ -53,13 +63,13 @@ jobs:
          API_BOT: ${{ secrets.BOT_API }}
          TYPE_KERNEL: ${{ secrets.EZA }}
 
-    - name: Upload Camellia Kernel
+    - name: Upload Camellia Artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Kernel-Build
+        name: Camellia-Kernel-Result
         path: |
           zip/*.zip
-          out/arch/arm64/boot/Image.gz-dtb
+          out/arch/arm64/boot/Image*
           out/arch/arm64/boot/dtbo.img
           error.log
