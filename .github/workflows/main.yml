@@ -1,39 +1,51 @@
-name: Aghisna R20 (Downloadable Version)
+name: Aghisna R20 (Camellia Optimized)
 
 on:
   workflow_dispatch:
 
 jobs:
-   build:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: setting configurasi
-      uses: actions/checkout@v3
+    - name: Checkout Source
+      uses: actions/checkout@v4
 
-    - name: setup environment
+    - name: Setup Environment
       run: |
           sudo apt-get update --fix-missing
           sudo apt-get install -y git make bc bison \
           openssl curl zip kmod cpio flex libelf-dev \
           libssl-dev libtfm-dev wget device-tree-compiler \
           ca-certificates python-is-python3 binutils \
-          binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-          libghc-libyaml-dev libyaml-dev glibc-source
+          binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-    - name: ready compile...
+    - name: Ready Compile
       run: |
-          # 1. 下载脚本
-          curl https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
+          # 1. 处理目录嵌套问题
+          # 你的源码在 Xiaomi_Kernel_OpenSource-camellia-r-oss/ 下
+          # 我们把所有内容移动到当前根目录，确保脚本能找到 Makefile
+          if [ -d "Xiaomi_Kernel_OpenSource-camellia-r-oss" ]; then
+            mv Xiaomi_Kernel_OpenSource-camellia-r-oss/* .
+          fi
+
+          # 2. 下载并配置编译脚本
+          curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 2. 【核心修改：阻止删除】利用 sed 注释掉脚本中所有的 rm -rf out 和 rm -rf zip 命令
-          # 这样编译完后，文件夹会被保留下来供下一步上传
+          # 3. 自动适配 Camellia 机型参数
+          sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
+          # 优先尝试 camellia_defconfig
+          sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
+          
+          # 4. 修复联发科(MTK)编译报错 & 阻止自动删除
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
-          sed -i 's/exit/#exit/g' miui-r20.sh
+          
+          # 关键：在脚本生成配置后，强制禁用导致报错的堆栈保护检查
+          sed -i '/make "$DEFCONFIG" O=out/a \sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\nmake O=out olddefconfig' miui-r20.sh
 
-          # 3. 执行脚本
+          # 5. 开始编译
           bash miui-r20.sh
       shell: bash
       env:
@@ -41,15 +53,13 @@ jobs:
          API_BOT: ${{ secrets.BOT_API }}
          TYPE_KERNEL: ${{ secrets.EZA }}
 
-    # 4. 【核心增加：GitHub 本地下载】
-    # 这一步会将 zip 文件夹里的所有 .zip 包上传到 GitHub 服务器
-    - name: Upload Kernel to GitHub Action
-      if: always() # 确保即使 Telegram 发送失败，也会尝试上传文件
+    - name: Upload Camellia Kernel
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: Compiled-Kernel-Package
+        name: Camellia-Kernel-Build
         path: |
           zip/*.zip
           out/arch/arm64/boot/Image.gz-dtb
-          out/arch/arm64/boot/Image.gz
+          out/arch/arm64/boot/dtbo.img
           error.log
