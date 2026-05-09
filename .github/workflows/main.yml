@@ -1,4 +1,4 @@
-name: Build Xiaomi Camellia Kernel
+name: Build Xiaomi Camellia Kernel (Stable Clang)
 
 on:
   workflow_dispatch:
@@ -9,12 +9,18 @@ jobs:
 
     steps:
 
+    # =========================
+    # 1. 拉源码（固定分支）
+    # =========================
     - name: Checkout source
       uses: actions/checkout@v4
       with:
         ref: camellia-r-oss
         fetch-depth: 1
 
+    # =========================
+    # 2. 基础依赖
+    # =========================
     - name: Install dependencies
       run: |
         sudo apt update
@@ -25,84 +31,115 @@ jobs:
           build-essential \
           cpio \
           flex \
+          git \
           libelf-dev \
           libssl-dev \
-          pahole \
+          lld \
+          llvm \
+          clang \
+          wget \
           zip \
           unzip \
-          git
+          pahole
 
-    - name: Setup GCC Toolchains
+    # =========================
+    # 3. Clang 工具链（稳定版）
+    # =========================
+    - name: Setup Clang toolchain
       run: |
-        mkdir -p $HOME/toolchains
-        cd $HOME/toolchains
+        mkdir -p $HOME/clang
+        cd $HOME/clang
 
-        git clone --depth=1 https://github.com/mvaisakh/gcc-arm64 gcc64
-        git clone --depth=1 https://github.com/mvaisakh/gcc-arm gcc32
+        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master.tar.gz -O clang.tar.gz
 
-        echo "$HOME/toolchains/gcc64/bin" >> $GITHUB_PATH
-        echo "$HOME/toolchains/gcc32/bin" >> $GITHUB_PATH
+        tar -xf clang.tar.gz
 
-    - name: Verify source tree
+        echo "$HOME/clang/bin" >> $GITHUB_PATH
+
+    # =========================
+    # 4. 检查源码
+    # =========================
+    - name: Verify kernel tree
       run: |
         echo "=== ROOT ==="
         ls -al
 
-        echo "=== DEFCONFIGS ==="
-        find arch/arm64/configs -type f | head -30
+        echo "=== CONFIGS ==="
+        find arch/arm64/configs -type f
 
-    - name: Fix MTK duplicate issue
-      run: |
-        FILE="drivers/media/platform/mtk-vcu/Makefile"
-
-        if [ -f "$FILE" ]; then
-          echo "=== PATCHING DUPLICATES ==="
-
-          awk '!seen[$0]++' "$FILE" > temp_makefile
-          mv temp_makefile "$FILE"
-        fi
-
+    # =========================
+    # 5. 自动选择 defconfig
+    # =========================
     - name: Detect defconfig
       run: |
         DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei \
-        'camellia|k69|mt68' | head -n 1)
-
-        echo "FOUND=$DEFCONFIG"
+        'camellia|k69|mt68|gki|vendor' | head -n 1)
 
         if [ -z "$DEFCONFIG" ]; then
-          echo "No defconfig found!"
+          echo "❌ No defconfig found"
           exit 1
         fi
+
+        echo "FOUND=$DEFCONFIG"
 
         basename "$DEFCONFIG" > defconfig.txt
 
         echo "USING=$(cat defconfig.txt)"
 
-    - name: Build kernel
+    # =========================
+    # 6. 修 MTK VCU（避免 duplicate symbol）
+    # =========================
+    - name: Fix MTK VCU build issue
+      run: |
+        FILE="drivers/media/platform/mtk-vcu/Makefile"
+
+        if [ -f "$FILE" ]; then
+          awk '!seen[$0]++' "$FILE" > tmp
+          mv tmp "$FILE"
+        fi
+
+    # =========================
+    # 7. 编译 kernel（核心修复点）
+    # =========================
+    - name: Build kernel (Clang)
       run: |
         export ARCH=arm64
         export SUBARCH=arm64
 
-        export CROSS_COMPILE=aarch64-elf-
-        export CROSS_COMPILE_ARM32=arm-eabi-
+        export CC=clang
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export OBJDUMP=llvm-objdump
+
+        export LLVM=1
+        export LLVM_IAS=1
 
         mkdir -p out
 
         DEFCONFIG=$(cat defconfig.txt)
 
-        echo "=== BUILDING ==="
+        echo "=== BUILD DEFCONFIG ==="
         echo "$DEFCONFIG"
 
         make O=out "$DEFCONFIG"
 
-        make -j$(nproc) O=out
+        make -j$(nproc) O=out \
+          CC=clang \
+          LD=ld.lld
 
-    - name: Show outputs
+    # =========================
+    # 8. 输出检查
+    # =========================
+    - name: Show build output
       run: |
-        echo "=== OUTPUT FILES ==="
+        echo "=== OUTPUT ==="
+        find out/arch/arm64/boot -type f || true
 
-        find out/arch/arm64/boot/ -type f | sort || true
-
+    # =========================
+    # 9. 上传产物
+    # =========================
     - name: Upload kernel
       uses: actions/upload-artifact@v4
       with:
