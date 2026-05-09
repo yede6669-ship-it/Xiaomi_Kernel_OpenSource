@@ -1,3 +1,4 @@
+
 name: Build Xiaomi Camellia Kernel
 
 on:
@@ -6,6 +7,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    env:
+      KERNEL_DIR: Xiaomi_Kernel_OpenSource
 
     steps:
     - name: Checkout source
@@ -19,8 +23,8 @@ jobs:
         pwd
         ls -al
 
-        echo "=== ARM64 CONFIGS ==="
-        find arch/arm64/configs -type f | sort || true
+        echo "=== KERNEL DIR ==="
+        ls -al $KERNEL_DIR
 
     - name: Install dependencies
       run: |
@@ -41,28 +45,34 @@ jobs:
           zip \
           unzip
 
+    - name: Enter kernel source
+      run: |
+        cd $KERNEL_DIR
+
+        echo "=== CURRENT DIR ==="
+        pwd
+
+        echo "=== ARM64 CONFIGS ==="
+        find arch/arm64/configs -type f | sort
+
     - name: Fix MTK duplicate symbol issue
       run: |
+        cd $KERNEL_DIR
+
         FILE="drivers/media/platform/mtk-vcu/Makefile"
 
         if [ -f "$FILE" ]; then
-          echo "=== BEFORE PATCH ==="
-          cat "$FILE"
-
-          echo "=== PATCHING ==="
+          echo "=== PATCHING DUPLICATE SYMBOL ISSUE ==="
 
           awk '!seen[$0]++' "$FILE" > temp_makefile
 
           mv temp_makefile "$FILE"
-
-          echo "=== AFTER PATCH ==="
-          cat "$FILE"
-        else
-          echo "Makefile not found, skipping patch."
         fi
 
     - name: Detect defconfig
       run: |
+        cd $KERNEL_DIR
+
         echo "=== SEARCHING DEFCONFIG ==="
 
         DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei 'camellia|k69|mt68|vendor' | head -n 1)
@@ -72,7 +82,6 @@ jobs:
         if [ -z "$DEFCONFIG" ]; then
           echo "No suitable defconfig found."
 
-          echo "Available configs:"
           find arch/arm64/configs -type f
 
           exit 1
@@ -86,6 +95,8 @@ jobs:
 
     - name: Build kernel
       run: |
+        cd $KERNEL_DIR
+
         export ARCH=arm64
         export SUBARCH=arm64
         export LLVM=1
@@ -102,8 +113,10 @@ jobs:
 
         make -j$(nproc) O=out
 
-    - name: Show build outputs
+    - name: Show outputs
       run: |
+        cd $KERNEL_DIR
+
         echo "=== OUTPUT FILES ==="
 
         find out/arch/arm64/boot/ -type f | sort || true
@@ -113,6 +126,8 @@ jobs:
       with:
         name: camellia-kernel-build
         path: |
-          out/arch/arm64/boot/Image
-          out/arch/arm64/boot/Image.gz
-          out/arch/arm64/boot/Image.gz-dtb
+          Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image
+          Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz
+          Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz-dtb
+`
+
