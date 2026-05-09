@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04  # 更新为可用版本
     timeout-minutes: 120
 
     steps:
@@ -19,13 +19,17 @@ jobs:
 
     - name: 安装GCC-8和依赖
       run: |
-        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+        # 由于ubuntu-22.04默认源没有gcc-8，需要添加ubuntu-20.04的源
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal main universe" | sudo tee -a /etc/apt/sources.list
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal-updates main universe" | sudo tee -a /etc/apt/sources.list
+        
         sudo apt update
-        # 增加 libelf-dev 和 cpio，这是原版内核链接时必需的
+        # 安装gcc-8及其交叉编译器，同时保留内核编译必需依赖
         sudo apt install -y gcc-8 g++-8 gcc-8-aarch64-linux-gnu g++-8-aarch64-linux-gnu \
           bc bison build-essential curl flex git libssl-dev libelf-dev \
           wget python3 device-tree-compiler libncurses5-dev make cpio
 
+        # 强制设置gcc-8优先级
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
 
@@ -43,7 +47,7 @@ jobs:
       run: |
         cd $HOME/kernel
         echo "===== 修复 MTK 源码头文件问题 ====="
-        # 修复 dt_idle_states.h 等本地包含路径
+        # 修复头文件包含路径问题
         find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
           sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
         done
@@ -52,7 +56,7 @@ jobs:
           sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
         done
 
-        # 建立机器路径符号链接，防止某些驱动找不到 mach 目录
+        # 建立关键目录链接，防止某些 MTK 驱动编译时找不到 plat 目录
         mkdir -p include/mach
         ln -sf $(pwd)/drivers/misc/mediatek/include/mt-plat/include/mach include/mach
 
@@ -64,9 +68,8 @@ jobs:
         
         make camellia_defconfig
 
-        # 禁用不稳定的调试功能，确保纯净原版能跑通
+        # 针对新环境/旧源码的稳定性修正
         sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g' .config
-        # 之前报错的 kheaders 建议在原版中也关闭，除非你必须用到它
         echo "CONFIG_IKHEADERS=n" >> .config
         
         make olddefconfig
@@ -82,7 +85,7 @@ jobs:
         export HOSTCXX=g++-8
         export KCFLAGS="-w"
 
-        echo "===== 开始编译原版 Image.gz-dtb ====="
+        echo "===== 开始编译 Image.gz-dtb ====="
         make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
           echo "编译失败，最后 100 行日志："
           tail -n 100 build.log
@@ -94,7 +97,6 @@ jobs:
         mkdir -p output
         if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
           cp "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" output/
-          echo "✅ 原版内核编译成功"
         fi
 
     - name: 上传产物
@@ -102,14 +104,3 @@ jobs:
       with:
         name: Original-Kernel-Camellia
         path: output/
-
-    - name: 生成摘要
-      run: |
-        echo "# 📦 原版内核构建完成" >> $GITHUB_STEP_SUMMARY
-        if [ -f "output/Image.gz-dtb" ]; then
-          echo "- 状态: 成功" >> $GITHUB_STEP_SUMMARY
-          echo "- 机型: Redmi Note 10 5G (camellia)" >> $GITHUB_STEP_SUMMARY
-          echo "- 大小: $(ls -lh output/Image.gz-dtb | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "- 状态: 失败" >> $GITHUB_STEP_SUMMARY
-        fi
