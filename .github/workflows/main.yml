@@ -13,10 +13,14 @@ jobs:
       with:
         submodules: true
 
-    - name: Show directory structure
+    - name: Show repository structure
       run: |
+        echo "=== ROOT ==="
         pwd
         ls -al
+
+        echo "=== ARM64 CONFIGS ==="
+        find arch/arm64/configs -type f | sort || true
 
     - name: Install dependencies
       run: |
@@ -37,19 +41,48 @@ jobs:
           zip \
           unzip
 
-    - name: Fix duplicate symbol issue
+    - name: Fix MTK duplicate symbol issue
       run: |
         FILE="drivers/media/platform/mtk-vcu/Makefile"
 
         if [ -f "$FILE" ]; then
-          echo "Patching duplicate mtk_vcodec_mem.o..."
+          echo "=== BEFORE PATCH ==="
+          cat "$FILE"
 
-          awk '
-          !seen[$0]++
-          ' "$FILE" > temp_makefile
+          echo "=== PATCHING ==="
+
+          awk '!seen[$0]++' "$FILE" > temp_makefile
 
           mv temp_makefile "$FILE"
+
+          echo "=== AFTER PATCH ==="
+          cat "$FILE"
+        else
+          echo "Makefile not found, skipping patch."
         fi
+
+    - name: Detect defconfig
+      run: |
+        echo "=== SEARCHING DEFCONFIG ==="
+
+        DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei 'camellia|k69|mt68|vendor' | head -n 1)
+
+        echo "FOUND=$DEFCONFIG"
+
+        if [ -z "$DEFCONFIG" ]; then
+          echo "No suitable defconfig found."
+
+          echo "Available configs:"
+          find arch/arm64/configs -type f
+
+          exit 1
+        fi
+
+        DEFCONFIG_NAME=$(basename "$DEFCONFIG")
+
+        echo "DEFCONFIG_NAME=$DEFCONFIG_NAME"
+
+        echo "$DEFCONFIG_NAME" > defconfig_name.txt
 
     - name: Build kernel
       run: |
@@ -60,20 +93,25 @@ jobs:
 
         mkdir -p out
 
-        make O=out camellia_user_defconfig
+        DEFCONFIG_NAME=$(cat defconfig_name.txt)
+
+        echo "=== USING DEFCONFIG ==="
+        echo "$DEFCONFIG_NAME"
+
+        make O=out "$DEFCONFIG_NAME"
 
         make -j$(nproc) O=out
 
-    - name: Show output files
+    - name: Show build outputs
       run: |
-        echo "=== boot output ==="
+        echo "=== OUTPUT FILES ==="
 
-        find out/arch/arm64/boot/ -type f | sort
+        find out/arch/arm64/boot/ -type f | sort || true
 
-    - name: Upload kernel artifacts
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: camellia-kernel
+        name: camellia-kernel-build
         path: |
           out/arch/arm64/boot/Image
           out/arch/arm64/boot/Image.gz
