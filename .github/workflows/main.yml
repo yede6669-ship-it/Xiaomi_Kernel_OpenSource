@@ -25,7 +25,6 @@ jobs:
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
 
-        # 创建交叉编译器软链接
         sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc-8 /usr/bin/aarch64-linux-gnu-gcc
         sudo ln -sf /usr/bin/aarch64-linux-gnu-g++-8 /usr/bin/aarch64-linux-gnu-g++
 
@@ -44,17 +43,13 @@ jobs:
         cd $HOME/kernel
         echo "===== 修复 MTK 源码头文件包含问题 ====="
         
-        # 1. 修复通用头文件包含
-        find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
-          sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
-        done
-        find drivers/clk -type f -name "*.c" -exec grep -l "clk-mux.h" {} \; | while read file; do
-          sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
-        done
+        # 1. 通用修复
+        find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' {} +
+        find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' {} +
 
-        # 2. 【强力修复】批量处理 helio-dvfsrc 目录下的所有本地头文件引用
-        # 只要是 <helio-dvfsrc...h> 全部换成 "helio-dvfsrc...h"
-        find drivers/devfreq/helio-dvfsrc-v3/ -type f -name "*.c" -print0 | xargs -0 sed -i 's/#include <\(helio-dvfsrc[^>]*\.h\)>/#include "\1"/g'
+        # 2. 【强化修复】批量处理 helio-dvfsrc 目录下所有 .c 和 .h 文件
+        # 只要是包含 helio-dvfsrc 相关的尖括号引用，全部转为双引号
+        find drivers/devfreq/helio-dvfsrc-v3/ -type f \( -name "*.c" -o -name "*.h" \) -print0 | xargs -0 sed -i 's/#include <\(helio-dvfsrc[^>]*\.h\)>/#include "\1"/g'
 
         # 3. 建立 mach 软链接
         mkdir -p include/mach
