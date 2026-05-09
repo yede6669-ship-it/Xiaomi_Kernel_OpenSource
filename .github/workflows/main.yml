@@ -1,9 +1,7 @@
-name: Build Camellia Kernel (Stable CI)
+
+name: Build Camellia Kernel
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -11,47 +9,39 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TOOLS_DIR: tools
-      OUT_DIR: kernel/out
       KERNEL_DIR: kernel
+      OUT_DIR: out
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - name: Checkout
+      uses: actions/checkout@v4
       with:
         submodules: true
 
-    - name: Set up environment
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y bc build-essential libncurses-dev bison flex libssl-dev libelf-dev git wget curl
-
-    - name: Clone mkbootimg_tools using GITHUB_TOKEN
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        git clone https://x-access-token:${GITHUB_TOKEN}@github.com/osm0sis/mkbootimg_tools.git $TOOLS_DIR
-
-    - name: Download example boot.img
-      run: |
-        mkdir -p $OUT_DIR
-        cd $OUT_DIR
-        # 这里下载一个示例 boot.img，实际你后续可以换成自己的设备
-        curl -L -o boot.img https://example.com/sample_boot.img || echo "示例 boot.img 下载失败，可以自己替换"
+        sudo apt update
+        sudo apt install -y \
+          bc bison build-essential flex \
+          libssl-dev libelf-dev \
+          clang lld llvm
 
     - name: Build kernel
       run: |
         cd $KERNEL_DIR
-        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-        make -j$(nproc) O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
-    - name: List build output
-      run: |
-        echo ">>> boot dir:"
-        ls -al $OUT_DIR/arch/arm64/boot/
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export LLVM=1
+        export LLVM_IAS=1
 
-    - name: Upload build artifacts
+        make O=$OUT_DIR camellia_user_defconfig
+
+        make -j$(nproc) O=$OUT_DIR
+
+    - name: Upload Image
       uses: actions/upload-artifact@v4
       with:
-        name: boot-image
-        path: $OUT_DIR/arch/arm64/boot/Image*
+        name: kernel-image
+        path: |
+          kernel/out/arch/arm64/boot/Image*
