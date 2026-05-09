@@ -11,7 +11,8 @@ jobs:
     - name: Checkout source
       uses: actions/checkout@v4
       with:
-        submodules: true
+        ref: camellia-r-oss
+        fetch-depth: 1
 
     - name: Install dependencies
       run: |
@@ -32,68 +33,27 @@ jobs:
           zip \
           unzip
 
-    - name: Locate kernel source
+    - name: Verify source tree
       run: |
-        echo "=== SEARCHING KERNEL SOURCE ==="
-
-        find . -name Makefile | head -20
-
-        if [ -f "./Makefile" ] && [ -d "./arch" ]; then
-          KERNEL_DIR="."
-        elif [ -f "./kernel/Makefile" ]; then
-          KERNEL_DIR="./kernel"
-        elif [ -f "./Xiaomi_Kernel_OpenSource/Makefile" ]; then
-          KERNEL_DIR="./Xiaomi_Kernel_OpenSource"
-        else
-          echo "Kernel source not found!"
-          exit 1
-        fi
-
-        echo "KERNEL_DIR=$KERNEL_DIR"
-
-        echo "$KERNEL_DIR" > kernel_dir.txt
-
-    - name: Show kernel tree
-      run: |
-        KERNEL_DIR=$(cat kernel_dir.txt)
-
-        cd $KERNEL_DIR
-
-        echo "=== CURRENT DIR ==="
-        pwd
-
-        echo "=== ROOT FILES ==="
+        echo "=== ROOT ==="
         ls -al
 
-        echo "=== CONFIGS ==="
-        find arch/arm64/configs -type f | head -50
+        echo "=== ARCH CONFIGS ==="
+        find arch/arm64/configs -type f | head -30
 
-    - name: Fix duplicate symbol issue
+    - name: Fix MTK duplicate issue
       run: |
-        KERNEL_DIR=$(cat kernel_dir.txt)
-
-        cd $KERNEL_DIR
-
         FILE="drivers/media/platform/mtk-vcu/Makefile"
 
         if [ -f "$FILE" ]; then
-          echo "=== PATCHING MTK DUPLICATES ==="
-
           awk '!seen[$0]++' "$FILE" > temp_makefile
-
           mv temp_makefile "$FILE"
         fi
 
     - name: Detect defconfig
       run: |
-        KERNEL_DIR=$(cat kernel_dir.txt)
-
-        cd $KERNEL_DIR
-
-        echo "=== DETECTING DEFCONFIG ==="
-
         DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei \
-        'camellia|k69|mt68|vendor|gki' | head -n 1)
+        'camellia|k69|mt68|gki|vendor' | head -n 1)
 
         echo "FOUND=$DEFCONFIG"
 
@@ -102,16 +62,12 @@ jobs:
           exit 1
         fi
 
-        basename "$DEFCONFIG" > defconfig_name.txt
+        basename "$DEFCONFIG" > defconfig.txt
 
-        echo "DEFCONFIG=$(cat defconfig_name.txt)"
+        echo "USING=$(cat defconfig.txt)"
 
     - name: Build kernel
       run: |
-        KERNEL_DIR=$(cat kernel_dir.txt)
-
-        cd $KERNEL_DIR
-
         export ARCH=arm64
         export SUBARCH=arm64
         export LLVM=1
@@ -119,30 +75,23 @@ jobs:
 
         mkdir -p out
 
-        DEFCONFIG=$(cat defconfig_name.txt)
-
-        echo "=== BUILDING WITH ==="
-        echo "$DEFCONFIG"
+        DEFCONFIG=$(cat defconfig.txt)
 
         make O=out "$DEFCONFIG"
 
         make -j$(nproc) O=out
 
-    - name: Show output
+    - name: Show outputs
       run: |
-        KERNEL_DIR=$(cat kernel_dir.txt)
-
-        cd $KERNEL_DIR
-
-        echo "=== BUILD OUTPUT ==="
+        echo "=== OUTPUT FILES ==="
 
         find out/arch/arm64/boot/ -type f | sort || true
 
-    - name: Upload artifacts
+    - name: Upload kernel
       uses: actions/upload-artifact@v4
       with:
         name: camellia-kernel
         path: |
-          **/out/arch/arm64/boot/Image
-          **/out/arch/arm64/boot/Image.gz
-          **/out/arch/arm64/boot/Image.gz-dtb
+          out/arch/arm64/boot/Image
+          out/arch/arm64/boot/Image.gz
+          out/arch/arm64/boot/Image.gz-dtb
