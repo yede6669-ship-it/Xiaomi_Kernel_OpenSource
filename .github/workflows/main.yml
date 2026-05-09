@@ -25,7 +25,7 @@ jobs:
 
     - name: Build Kernel
       run: |
-          # 1. 结构重组：确保 Makefile 位于根目录
+          # 1. 结构重组
           if [ ! -f "Makefile" ]; then
             M_PATH=$(find . -name "Makefile" -printf '%h' -quit)
             [ -n "$M_PATH" ] && cp -af $M_PATH/. .
@@ -35,34 +35,31 @@ jobs:
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 3. 运行脚本前的预处理：下载 Clang
-          # 脚本内部会下载 clang 到 /home/runner/clang
-          # 我们先手动触发一次脚本里的下载逻辑，或者直接等它下载完
+          # 3. 预下载 Clang 并清理坏掉的汇编器
           bash miui-r20.sh & sleep 60 && kill $! || true
-
-          # 4. 【核心修复】强力移除不兼容的汇编器
-          # 删掉 clang 目录下的 as，强制它使用系统的 aarch64-linux-gnu-as
-          echo "Removing problematic assembler..."
           rm -rf /home/runner/clang/bin/as
           rm -rf /home/runner/clang/bin/aarch64-linux-gnu-as
           rm -rf /home/runner/clang/bin/arm-linux-gnueabi-as
 
-          # 5. 修改全局 Makefile
+          # 4. 【核心修复】解决 cfi.c 报错 + 强制 LLVM 模式
+          # 我们把 -Wno-int-conversion 注入到全局配置，让新版 Clang 宽容旧代码
           sed -i '1i LLVM := 1' Makefile
           sed -i '1i LLVM_IAS := 1' Makefile
+          sed -i '/^KBUILD_CFLAGS/ s/$/ -Wno-error=int-conversion -Wno-error=implicit-function-declaration/' Makefile
 
-          # 6. 适配机型参数并禁用清理
+          # 5. 适配机型参数并禁用清理
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
           sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
           sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
           
-          # 7. 注入 MTK 堆栈补丁
+          # 6. 注入 MTK 堆栈补丁
           sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out LLVM=1 LLVM_IAS=1 olddefconfig' miui-r20.sh
           
-          # 8. 强力执行
+          # 7. 强力执行
           export PATH="/home/runner/clang/bin:$PATH"
-          bash miui-r20.sh LLVM=1 LLVM_IAS=1
+          # 显式传递 KCFLAGS 确保容错参数生效
+          bash miui-r20.sh LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error=int-conversion"
       shell: bash
       env:
          CHATID: ${{ secrets.CHAT_ID }}
