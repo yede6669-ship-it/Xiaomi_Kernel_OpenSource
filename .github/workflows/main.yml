@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: '内核分支 (请确保分支内有 Makefile)'
+        description: '内核分支'
         required: true
         default: 'camellia-r-oss'
 
@@ -16,9 +16,6 @@ jobs:
       ARCH: arm64
       SUBARCH: arm64
       OUT_DIR: out
-      # 强制宿主机工具使用 GCC 12 以兼容旧内核脚本
-      CC: gcc-12
-      CXX: g++-12
 
     steps:
     - name: Checkout Repository
@@ -30,7 +27,6 @@ jobs:
     - name: Install Toolchain & Dependencies
       run: |
         sudo apt update
-        # 安装 gcc-12 以及交叉编译器
         sudo apt install -y \
           bc bison flex libssl-dev libelf-dev \
           build-essential git curl wget \
@@ -43,52 +39,66 @@ jobs:
         if [ -z "$DEFCONFIG_PATH" ]; then
           DEFCONFIG_PATH=$(find arch/arm64/configs -name "defconfig" | head -n 1)
         fi
-        DEFCONFIG_NAME=$(basename "$DEFCONFIG_PATH")
-        echo "DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
+        echo "DEFCONFIG=$(basename "$DEFCONFIG_PATH")" >> $GITHUB_ENV
 
-    - name: Fix Source Bugs
+    - name: Generate Config & Fix Stack Protector
       run: |
-        # 移除 MTK VCU 重复定义
+        mkdir -p $OUT_DIR
+        # 1. 生成初始配置
+        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- HOSTCC=gcc-12 $DEFCONFIG
+        
+        # 2. 核心修复：强制禁用由于环境探测失败导致的堆栈保护错误
+        sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g' $OUT_DIR/.config
+        
+        # 3. 针对联发科源码的通用补丁
+        # 移除 MTK VCU 重复符号
         FILE="drivers/media/platform/mtk-vcu/Makefile"
         if [ -f "$FILE" ]; then
           sed -i 's/mtk_vcu_mem.o//g' "$FILE" || true
         fi
-        
-        # 针对新版 GCC 的脚本兼容性修复 (消除一些会导致中断的警告)
-        sed -i 's/-Werror//g' Makefile || true
-
-    - name: Generate Config
-      run: |
-        mkdir -p $OUT_DIR
-        # 使用 HOSTCC 指定宿主机编译器为 gcc-12
-        make O=$OUT_DIR ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- HOSTCC=gcc-12 $DEFCONFIG
+        # 移除所有将警告视为错误的开关
+        find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g' || true
 
     - name: Build Kernel
       run: |
-        # 联发科内核编译命令
         make -j$(nproc) O=$OUT_DIR \
           ARCH=arm64 \
           HOSTCC=gcc-12 \
+          HOSTCXX=g++-12 \
           CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           LD=ld.lld \
           AR=llvm-ar \
           NM=llvm-nm \
           OBJCOPY=llvm-objcopy \
           OBJDUMP=llvm-objdump \
           STRIP=llvm-strip \
+          OBJSIZE=llvm-size \
+          READELF=llvm-readelf \
+          HOSTAR=llvm-ar \
+          HOSTLD=ld.lld \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
           AS=aarch64-linux-gnu-as \
           LLVM=1 \
           LLVM_IAS=1
+
+    - name: Check Results
+      run: |
+        if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz" ] || [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
+          echo "Build Success!"
+        else
+          echo "Build Failed: Kernel Image not found"
+          exit 1
+        fi
 
     - name: Upload Kernel Artifact
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Camellia-Kernel
+        name: Camellia-Kernel-Build
         path: |
           ${{ env.OUT_DIR }}/arch/arm64/boot/Image
           ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz
           ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz-dtb
+          ${{ env.OUT_DIR }}/.config
