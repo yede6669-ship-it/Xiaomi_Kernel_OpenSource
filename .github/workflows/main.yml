@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
     - name: Checkout source
       uses: actions/checkout@v4
       with:
@@ -26,19 +27,28 @@ jobs:
           flex \
           libelf-dev \
           libssl-dev \
-          clang \
-          llvm \
-          lld \
           pahole \
           zip \
-          unzip
+          unzip \
+          git
+
+    - name: Setup GCC Toolchains
+      run: |
+        mkdir -p $HOME/toolchains
+        cd $HOME/toolchains
+
+        git clone --depth=1 https://github.com/mvaisakh/gcc-arm64 gcc64
+        git clone --depth=1 https://github.com/mvaisakh/gcc-arm gcc32
+
+        echo "$HOME/toolchains/gcc64/bin" >> $GITHUB_PATH
+        echo "$HOME/toolchains/gcc32/bin" >> $GITHUB_PATH
 
     - name: Verify source tree
       run: |
         echo "=== ROOT ==="
         ls -al
 
-        echo "=== ARCH CONFIGS ==="
+        echo "=== DEFCONFIGS ==="
         find arch/arm64/configs -type f | head -30
 
     - name: Fix MTK duplicate issue
@@ -46,6 +56,8 @@ jobs:
         FILE="drivers/media/platform/mtk-vcu/Makefile"
 
         if [ -f "$FILE" ]; then
+          echo "=== PATCHING DUPLICATES ==="
+
           awk '!seen[$0]++' "$FILE" > temp_makefile
           mv temp_makefile "$FILE"
         fi
@@ -53,7 +65,7 @@ jobs:
     - name: Detect defconfig
       run: |
         DEFCONFIG=$(find arch/arm64/configs -type f | grep -Ei \
-        'camellia|k69|mt68|gki|vendor' | head -n 1)
+        'camellia|k69|mt68' | head -n 1)
 
         echo "FOUND=$DEFCONFIG"
 
@@ -70,12 +82,16 @@ jobs:
       run: |
         export ARCH=arm64
         export SUBARCH=arm64
-        export LLVM=1
-        export LLVM_IAS=1
+
+        export CROSS_COMPILE=aarch64-elf-
+        export CROSS_COMPILE_ARM32=arm-eabi-
 
         mkdir -p out
 
         DEFCONFIG=$(cat defconfig.txt)
+
+        echo "=== BUILDING ==="
+        echo "$DEFCONFIG"
 
         make O=out "$DEFCONFIG"
 
