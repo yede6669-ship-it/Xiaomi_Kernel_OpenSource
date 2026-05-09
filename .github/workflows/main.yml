@@ -1,4 +1,3 @@
-
 name: Build Xiaomi Camellia Kernel
 
 on:
@@ -129,5 +128,3 @@ jobs:
           Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image
           Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz
           Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz-dtb
-`
-
