@@ -5,33 +5,33 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 更新为可用版本
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
 
     steps:
     - name: 检出仓库
       uses: actions/checkout@v4
 
-    - name: 清理磁盘空间
-      run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-        sudo apt-get clean && sudo apt-get autoremove -y
-
     - name: 安装GCC-8和依赖
       run: |
-        # 由于ubuntu-22.04默认源没有gcc-8，需要添加ubuntu-20.04的源
+        # 添加 Ubuntu 20.04 源以获取 GCC-8
         echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal main universe" | sudo tee -a /etc/apt/sources.list
         echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal-updates main universe" | sudo tee -a /etc/apt/sources.list
         
         sudo apt update
-        # 安装gcc-8及其交叉编译器，同时保留内核编译必需依赖
         sudo apt install -y gcc-8 g++-8 gcc-8-aarch64-linux-gnu g++-8-aarch64-linux-gnu \
           bc bison build-essential curl flex git libssl-dev libelf-dev \
           wget python3 device-tree-compiler libncurses5-dev make cpio
 
-        # 强制设置gcc-8优先级
+        # 设置本地 GCC 优先级
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
+
+        # 【关键修复】创建交叉编译器的软链接，解决 No such file 报错
+        # 将带版本号的编译器链接到内核 Makefile 默认寻找的名字上
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc-8 /usr/bin/aarch64-linux-gnu-gcc
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-g++-8 /usr/bin/aarch64-linux-gnu-g++
+        sudo ln -sf /usr/bin/aarch64-linux-gnu-cpp-8 /usr/bin/aarch64-linux-gnu-cpp
 
     - name: 下载源码
       run: |
@@ -47,7 +47,6 @@ jobs:
       run: |
         cd $HOME/kernel
         echo "===== 修复 MTK 源码头文件问题 ====="
-        # 修复头文件包含路径问题
         find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
           sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
         done
@@ -56,7 +55,6 @@ jobs:
           sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
         done
 
-        # 建立关键目录链接，防止某些 MTK 驱动编译时找不到 plat 目录
         mkdir -p include/mach
         ln -sf $(pwd)/drivers/misc/mediatek/include/mt-plat/include/mach include/mach
 
@@ -67,11 +65,8 @@ jobs:
         export CROSS_COMPILE=aarch64-linux-gnu-
         
         make camellia_defconfig
-
-        # 针对新环境/旧源码的稳定性修正
         sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g' .config
         echo "CONFIG_IKHEADERS=n" >> .config
-        
         make olddefconfig
 
     - name: 编译内核
@@ -79,10 +74,11 @@ jobs:
         cd $HOME/kernel
         export ARCH=arm64
         export SUBARCH=arm64
+        # 显式指定交叉编译前缀
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=aarch64-linux-gnu-gcc-8
-        export HOSTCC=gcc-8
-        export HOSTCXX=g++-8
+        export CC=aarch64-linux-gnu-gcc
+        export HOSTCC=gcc
+        export HOSTCXX=g++
         export KCFLAGS="-w"
 
         echo "===== 开始编译 Image.gz-dtb ====="
