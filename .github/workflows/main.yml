@@ -1,4 +1,4 @@
-name: Aghisna R20 Camellia Final Fix
+name: Aghisna R20 Camellia Deep Fix
 
 on:
   workflow_dispatch:
@@ -12,6 +12,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         ref: camellia-r-oss
+        fetch-depth: 1
 
     - name: Setup Environment
       run: |
@@ -22,47 +23,50 @@ jobs:
           ca-certificates python-is-python3 binutils \
           binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-    - name: Rearrange and Build
+    - name: Build Kernel
       run: |
-          # 1. 结构大重组 (核心步骤)
-          # 你的仓库目前是：arch/arm64/[所有源码]
-          # 我们把它们全部拷贝到根目录，让它变成一个标准的内核工程
-          echo "正在强行修复源码结构..."
-          cp -af arch/arm64/* . 
+          # 1. 强制确定当前位置
+          cd $GITHUB_WORKSPACE
+          echo "Checking directory: $(pwd)"
           
-          # 2. 检查 Makefile 是否已经出现在根目录
-          if [ -f "Makefile" ]; then
-            echo "Makefile 提取成功，开始准备编译脚本..."
-          else
-            echo "错误：即使在 arch/arm64/ 下也找不到 Makefile！"
-            ls -R arch/arm64/ | head -n 20
-            exit 1
+          # 2. 检查 Makefile，如果不在根目录则递归搜索
+          if [ ! -f "Makefile" ]; then
+            echo "Warning: Makefile not in root. Finding..."
+            M_PATH=$(find . -name "Makefile" -printf '%h' -quit)
+            if [ -n "$M_PATH" ]; then
+                echo "Found Makefile in $M_PATH, moving everything to root..."
+                cp -af $M_PATH/. .
+            else
+                echo "FATAL: Makefile absolutely missing!"
+                ls -R
+                exit 1
+            fi
           fi
 
-          # 3. 下载脚本并进行 Camellia 适配
+          # 3. 下载脚本并注入 MTK 补丁
           curl -LSs https://raw.githubusercontent.com/RooGhz720/RooGhz720/main/rx/miui-r20.sh > miui-r20.sh
           chmod +x miui-r20.sh
           
-          # 修改机型和配置文件名
+          # 适配 Camellia 参数
           sed -i 's/DEVICE="Redmi note 10 pro"/DEVICE="Redmi Note 10 5G"/g' miui-r20.sh
           sed -i 's/DEFCONFIG="sweet_defconfig"/DEFCONFIG="camellia_defconfig"/g' miui-r20.sh
           
-          # 4. 禁用脚本自带的清理功能 (防止删掉我们刚刚移动的文件)
-          sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
-          sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
-          
-          # 5. 注入补丁：解决联发科源码在 GitHub Actions 上的报错
-          # 在执行 make $DEFCONFIG 后强制关掉堆栈保护
+          # 核心修复：针对 MTK 源码在云端的 Stack Protector 报错
+          # 在执行 make 后强制禁用堆栈检查
           sed -i '/make "$DEFCONFIG" O=out/a \          sed -i "s/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g" out/.config\n          make O=out olddefconfig' miui-r20.sh
 
-          # 6. 执行编译
+          # 阻止脚本清理
+          sed -i 's/rm -rf out/#rm -rf out/g' miui-r20.sh
+          sed -i 's/rm -rf zip/#rm -rf zip/g' miui-r20.sh
+
+          # 4. 执行编译
           bash miui-r20.sh
       shell: bash
       env:
          CHATID: ${{ secrets.CHAT_ID }}
          API_BOT: ${{ secrets.BOT_API }}
 
-    - name: Upload Camellia Artifacts
+    - name: Upload Artifact
       if: always()
       uses: actions/upload-artifact@v4
       with:
