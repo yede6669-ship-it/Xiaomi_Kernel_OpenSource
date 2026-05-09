@@ -1,98 +1,29 @@
-name: Build Original Kernel (Camellia)
-
+# A simple action usage
+name: Build Kernel
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
+  Build-Kernel:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
-    - name: 检出仓库
-      uses: actions/checkout@v4
-
-    - name: 安装GCC-8和依赖
-      run: |
-        echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal main universe" | sudo tee -a /etc/apt/sources.list
-        echo "deb http://dk.archive.ubuntu.com/ubuntu/ focal-updates main universe" | sudo tee -a /etc/apt/sources.list
-        
-        sudo apt update
-        sudo apt install -y gcc-8 g++-8 gcc-8-aarch64-linux-gnu g++-8-aarch64-linux-gnu \
-          bc bison build-essential curl flex git libssl-dev libelf-dev \
-          wget python3 device-tree-compiler libncurses5-dev make cpio
-
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
-
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc-8 /usr/bin/aarch64-linux-gnu-gcc
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-g++-8 /usr/bin/aarch64-linux-gnu-g++
-
-    - name: 下载源码
-      run: |
-        cd $HOME
-        wget -q --show-progress \
-          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-          -O kernel.zip
-        unzip -q kernel.zip
-        mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
-        rm kernel.zip
-
-    - name: 修复内核源码问题
-      run: |
-        cd $HOME/kernel
-        echo "===== 修复 MTK 源码头文件包含问题 ====="
-        
-        # 1. 通用修复
-        find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' {} +
-        find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' {} +
-
-        # 2. 【强化修复】批量处理 helio-dvfsrc 目录下所有 .c 和 .h 文件
-        # 只要是包含 helio-dvfsrc 相关的尖括号引用，全部转为双引号
-        find drivers/devfreq/helio-dvfsrc-v3/ -type f \( -name "*.c" -o -name "*.h" \) -print0 | xargs -0 sed -i 's/#include <\(helio-dvfsrc[^>]*\.h\)>/#include "\1"/g'
-
-        # 3. 建立 mach 软链接
-        mkdir -p include/mach
-        ln -sf $(pwd)/drivers/misc/mediatek/include/mt-plat/include/mach include/mach
-
-    - name: 配置内核
-      run: |
-        cd $HOME/kernel
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        
-        make camellia_defconfig
-        sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_NONE=y/g' .config
-        echo "CONFIG_IKHEADERS=n" >> .config
-        make olddefconfig
-
-    - name: 编译内核
-      run: |
-        cd $HOME/kernel
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=aarch64-linux-gnu-gcc
-        export HOSTCC=gcc
-        export HOSTCXX=g++
-        export KCFLAGS="-w"
-
-        echo "===== 开始编译 Image.gz-dtb ====="
-        make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
-          echo "编译失败，最后 100 行日志："
-          tail -n 100 build.log
-          exit 1
-        }
-
-    - name: 整理产物
-      run: |
-        mkdir -p output
-        if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
-          cp "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" output/
-        fi
-
-    - name: 上传产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: Original-Kernel-Camellia
-        path: output/
+      - name: Build Kernel
+        uses: dabao1955/kernel_build_action@main
+        with:
+          kernel-url: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+          kernel-dir: msm-4.14
+          kernel-branch: camellia-r-oss
+          config: k6833v1_64_defconfig
+          arch: arm64
+          aosp-gcc: true
+          aosp-clang: true
+         
+          android-version: 13
+          aosp-clang-version: r383902
+          disable-lto: true
+          anykernel3: true
