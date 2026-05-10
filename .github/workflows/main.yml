@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 不用24.04，22.04对旧内核更兼容
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout kernel source
@@ -34,18 +34,78 @@ jobs:
             python3 python3-pip cpio kmod \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf \
-            liblz4-tool xz-utils zlib1g-dev libncurses5-dev
+            liblz4-tool xz-utils zlib1g-dev libncurses5-dev \
+            zstd
           aarch64-linux-gnu-gcc --version | head -1
 
-      # 使用 Neutron Clang 18，专为 Android 旧内核设计，兼容性好
-      - name: Download Neutron Clang 18
+      - name: Download Neutron Clang
         run: |
-          mkdir -p clang
-          cd clang
-          # Neutron Clang 专为 Android 内核优化，不会有 GLIBC 问题（ubuntu-22.04自带2.35+）
-          curl -LO "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/11012023/neutron-clang-11012023.tar.zst"
-          tar --use-compress-program=unzstd -xf neutron-clang-11012023.tar.zst
-          rm neutron-clang-11012023.tar.zst
+          mkdir -p ${{ github.workspace }}/clang
+
+          # 用官方脚本获取最新 Neutron Clang
+          # 先尝试获取 catalogue JSON 找最新版本
+          CATALOGUE_URL="https://raw.githubusercontent.com/Neutron-Toolchains/clang-build-catalogue/main/catalogue.json"
+          
+          echo "Fetching catalogue..."
+          CATALOGUE=$(curl -fsSL "$CATALOGUE_URL" || echo "")
+
+          if [ -n "$CATALOGUE" ]; then
+            # 从 catalogue 取最新 tag
+            LATEST_TAG=$(echo "$CATALOGUE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          # catalogue 是个列表，取第一个（最新）
+          if isinstance(data, list):
+              print(data[0].get('tag_name', data[0].get('name', '')))
+          elif isinstance(data, dict):
+              keys = list(data.keys())
+              print(keys[0] if keys else '')
+          " 2>/dev/null || echo "")
+            echo "Latest tag from catalogue: $LATEST_TAG"
+          fi
+
+          # 直接用已知可用的稳定版本下载
+          # antman 是 Neutron 官方提供的下载脚本
+          cd ${{ github.workspace }}/clang
+          
+          echo "Downloading via antman script..."
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          
+          # antman -S 同步/下载最新版本
+          bash antman -S || {
+            echo "antman failed, trying direct download..."
+            
+            # 备用：直接下载已知有效的版本
+            # 使用 GitHub API 获取最新 release
+            LATEST=$(curl -fsSL "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
+              | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['tag_name'])" 2>/dev/null || echo "")
+            
+            echo "Latest release tag: $LATEST"
+            
+            if [ -n "$LATEST" ]; then
+              ASSET_URL=$(curl -fsSL "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
+                | python3 -c "
+          import sys, json
+          r = json.load(sys.stdin)
+          for a in r.get('assets', []):
+              if a['name'].endswith('.tar.zst'):
+                  print(a['browser_download_url'])
+                  break
+          " 2>/dev/null || echo "")
+              
+              echo "Asset URL: $ASSET_URL"
+              
+              if [ -n "$ASSET_URL" ]; then
+                curl -L --progress-bar "$ASSET_URL" -o neutron-clang.tar.zst
+                tar --use-compress-program=unzstd -xf neutron-clang.tar.zst
+                rm neutron-clang.tar.zst
+              fi
+            fi
+          }
+
+          echo "=== Clang check ==="
+          ls bin/ | head -10
           bin/clang --version | head -1
 
       - name: Build kernel
@@ -54,7 +114,6 @@ jobs:
           export CLANG_PATH="${{ github.workspace }}/clang/bin"
           export PATH="$CLANG_PATH:$PATH"
 
-          # 禁用所有 warning as error，避免新编译器对旧代码的误判
           export KCFLAGS="-w"
           export KCPPFLAGS="-w"
 
@@ -67,18 +126,14 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
             LLVM_IAS=0"
 
-          # 生成配置
           make $ARGS camellia_defconfig
 
-          # 修复 CONFIG_CC_STACKPROTECTOR 检测误判
           scripts/config --file out/.config \
             --disable CONFIG_CC_STACKPROTECTOR_STRONG \
             --enable  CONFIG_CC_STACKPROTECTOR_NONE
 
-          # 重新同步配置
           make $ARGS olddefconfig
 
-          # 编译
           make $ARGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
@@ -93,9 +148,7 @@ jobs:
       - name: Check output
         if: always()
         run: |
-          echo "=== Disk usage ==="
           df -h
-          echo "=== Boot files ==="
           ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "not found"
 
       - name: Upload kernel
