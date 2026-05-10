@@ -38,20 +38,87 @@ jobs:
 
       - name: Download AOSP Clang r416183b
         run: |
-          echo "Cloning AOSP Clang r416183b (branch: 11)..."
           git clone --depth=1 --single-branch \
             --branch 11 \
             https://github.com/Corvus-AOSP/android_prebuilts_clang_host_linux-x86_clang-r416183b \
             ${{ github.workspace }}/clang
-          echo "=== Clang version ==="
           ${{ github.workspace }}/clang/bin/clang --version | head -1
+
+      - name: Create assembler wrappers
+        run: |
+          mkdir -p ${{ github.workspace }}/wrapper
+          CLANG=${{ github.workspace }}/clang/bin/clang
+
+          # 用 python3 写文件，完全避免 shell heredoc 和 YAML 转义问题
+          python3 - <<'PYEOF'
+import os, stat
+
+clang = os.environ.get('CLANG', '${{ github.workspace }}/clang/bin/clang')
+wrapper_dir = '${{ github.workspace }}/wrapper'
+os.makedirs(wrapper_dir, exist_ok=True)
+
+# as wrapper: ARM调用转clang，x86走系统as
+as_script = '''#!/bin/bash
+IS_ARM=0
+for arg in "$@"; do
+  case "$arg" in
+    -EL|-EB|--target=aarch64*|--target=arm*) IS_ARM=1 ;;
+  esac
+done
+if [ "$IS_ARM" = "1" ]; then
+  exec {clang} --target=aarch64-linux-gnu -c "$@"
+else
+  exec /usr/bin/as "$@"
+fi
+'''.format(clang=clang)
+
+# aarch64 wrapper
+aarch64_script = '''#!/bin/bash
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    -EL|-EB) ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+exec {clang} --target=aarch64-linux-gnu -c "${{ARGS[@]}}"
+'''.format(clang=clang)
+
+# arm32 wrapper
+arm32_script = '''#!/bin/bash
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    -EL|-EB) ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+exec {clang} --target=arm-linux-gnueabihf -c "${{ARGS[@]}}"
+'''.format(clang=clang)
+
+files = {
+  'as': as_script,
+  'aarch64-linux-gnu-as': aarch64_script,
+  'arm-linux-gnueabihf-as': arm32_script,
+}
+
+for name, content in files.items():
+  path = os.path.join(wrapper_dir, name)
+  with open(path, 'w') as f:
+    f.write(content)
+  os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+  print(f'Created: {path}')
+
+PYEOF
+          echo "=== Wrapper check ==="
+          cat ${{ github.workspace }}/wrapper/as
+          echo "---"
+          ls -la ${{ github.workspace }}/wrapper/
 
       - name: Build kernel
         working-directory: kernel
         run: |
-          export CLANG_PATH="${{ github.workspace }}/clang/bin"
-          export PATH="$CLANG_PATH:$PATH"
-
+          export PATH="${{ github.workspace }}/wrapper:${{ github.workspace }}/clang/bin:$PATH"
           export KCFLAGS="-w"
           export KCPPFLAGS="-w"
 
@@ -66,12 +133,12 @@ jobs:
 
           echo "=== Tool check ==="
           clang --version | head -1
-          aarch64-linux-gnu-gcc --version | head -1
+          which as
 
-          echo "=== Generating defconfig ==="
+          echo "=== defconfig ==="
           make $ARGS camellia_defconfig
 
-          echo "=== Fixing stackprotector ==="
+          echo "=== Fix stackprotector ==="
           scripts/config --file out/.config \
             --disable CONFIG_CC_STACKPROTECTOR_STRONG \
             --enable  CONFIG_CC_STACKPROTECTOR_NONE
@@ -81,7 +148,7 @@ jobs:
           make $ARGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
-          echo "=== Exit code: $BUILD_EXIT ==="
+          echo "=== Exit: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS ==="
             grep "error:" build.log | grep -v "^#" | head -80 || true
@@ -94,7 +161,7 @@ jobs:
         if: always()
         run: |
           df -h
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "not found"
           find kernel/out -name "Image*" 2>/dev/null || true
 
       - name: Upload kernel
