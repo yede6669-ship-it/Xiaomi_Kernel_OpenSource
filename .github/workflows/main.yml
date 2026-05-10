@@ -1,4 +1,4 @@
-name: Build Xiaomi Camellia Kernel (Clang 12)
+name: Build Xiaomi Camellia Kernel
 
 on:
   workflow_dispatch:
@@ -18,30 +18,27 @@ jobs:
       - name: Install Build Essentials
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 wget tar
+          # 安装 GCC 交叉编译器，这是 Clang 的重要辅助
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 wget tar \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang lld llvm
 
-      - name: Install Google Clang 12 (NDK r23c)
+      - name: Setup Clang 12
         run: |
-          mkdir -p $GITHUB_WORKSPACE/clang
-          cd $GITHUB_WORKSPACE/clang
-          # 下载 Google 官方编译好的 Clang 12
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183b1.tar.gz
-          tar -xf clang-r416183b1.tar.gz
-          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+          # 使用 Ubuntu 自带的 Clang 12，这比手动下载更稳定且路径自动配置
+          sudo apt-get install -y clang-12 lld-12
+          # 创建软链接，确保系统调用 clang 时用的是 12 版本
+          sudo ln -sf /usr/bin/clang-12 /usr/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-12 /usr/bin/ld.lld
 
       - name: Build Kernel
         run: |
           # 1. 核心环境变量
           export ARCH=arm64
           export SUBARCH=arm64
-          export CLANG_PATH=$GITHUB_WORKSPACE/clang/bin
-          export PATH=$CLANG_PATH:$PATH
           
-          # 交叉编译工具链前缀
+          # 明确交叉编译器前缀
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
           
           # 2. 准备输出
           mkdir -p out
@@ -52,7 +49,7 @@ jobs:
           make O=out k6833v1_64_defconfig
           
           # 4. 正式开始编译
-          # 使用所有 LLVM 工具以保持一致性
+          # 关键：手动指定 CC=clang，且确保用的是 clang-12
           make -j$(nproc --all) O=out \
               CC=clang \
               CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -68,7 +65,7 @@ jobs:
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-Clang12
+          name: Camellia-Kernel-Result
           path: |
             out/arch/arm64/boot/Image*
             out/arch/arm64/boot/dtbo.img
