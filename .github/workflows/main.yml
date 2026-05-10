@@ -36,14 +36,12 @@ jobs:
             liblz4-tool xz-utils zlib1g-dev libncurses5-dev
           aarch64-linux-gnu-gcc --version | head -1
 
-      # 直接 clone AOSP Clang r416183b 的 GitHub 镜像
-      # 这是 Android 11 时代官方工具链，GLIBC 需求极低
       - name: Download AOSP Clang r416183b
         run: |
-          echo "Cloning AOSP Clang r416183b from GitHub mirror..."
+          echo "Cloning AOSP Clang r416183b (branch: 11)..."
           git clone --depth=1 --single-branch \
-            --branch clang-r416183b \
-            https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r416183b \
+            --branch 11 \
+            https://github.com/Corvus-AOSP/android_prebuilts_clang_host_linux-x86_clang-r416183b \
             ${{ github.workspace }}/clang
           echo "=== Clang version ==="
           ${{ github.workspace }}/clang/bin/clang --version | head -1
