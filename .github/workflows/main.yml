@@ -1,9 +1,7 @@
 name: Build Xiaomi Camellia Kernel
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch: # 建议手动触发，方便调试
 
 jobs:
   build:
@@ -13,40 +11,43 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
+          ref: camellia # 关键：强制切换到山茶花分支
           submodules: 'recursive'
           fetch-depth: 1
-          # 确保源码直接放在根目录，而不是子文件夹
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 clang lld llvm
 
-      - name: Build Kernel
-        # 如果你的 Makefile 在子目录（比如 KKEE），请把下面这行改为 ./KKEE
-        working-directory: . 
+      - name: Find Makefile and Build
         run: |
-          # 1. 准备输出目录
+          # 1. 自动定位 Makefile 所在的目录
+          MAKE_PATH=$(find . -maxdepth 3 -name Makefile -print -quit | xargs dirname)
+          
+          if [ -z "$MAKE_PATH" ]; then
+            echo "错误：在仓库中完全找不到 Makefile！请检查 camellia 分支是否有代码。"
+            ls -R
+            exit 1
+          fi
+          
+          echo "找到 Makefile 位于: $MAKE_PATH"
+          cd "$MAKE_PATH"
+
+          # 2. 准备输出目录
           mkdir -p out
           
-          # 2. 定义环境变量
+          # 3. 定义环境变量
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
           
-          # 3. 检查 Makefile 是否存在（防止路径错误）
-          if [ ! -f Makefile ]; then
-            echo "错误：当前目录 $(pwd) 下找不到 Makefile！"
-            ls -al
-            exit 1
-          fi
-
-          # 4. 开始构建 (跳过 clean，直接 mrproper 更彻底)
+          # 4. 开始构建
           make O=out mrproper
           
-          # 5. 配置 (确认这个文件名在你 arch/arm64/configs/ 下)
+          # 5. 配置 (请确保此文件名在 arch/arm64/configs/ 下)
           make O=out k6833v1_64_defconfig
           
           # 6. 编译
@@ -60,4 +61,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Kernel-Image
-          path: out/arch/arm64/boot/Image*
+          path: "**/out/arch/arm64/boot/Image*"
