@@ -1,7 +1,7 @@
 name: Build Xiaomi Camellia Kernel
 
 on:
-  workflow_dispatch: # 建议手动触发，方便调试
+  workflow_dispatch: # 手动触发
 
 jobs:
   build:
@@ -11,54 +11,53 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
-          ref: camellia # 关键：强制切换到山茶花分支
+          ref: camellia-r-oss # 修正为完整的分支名
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Install dependencies
+      - name: Install Build Essentials
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 clang lld llvm
 
-      - name: Find Makefile and Build
+      - name: Build Kernel
         run: |
-          # 1. 自动定位 Makefile 所在的目录
-          MAKE_PATH=$(find . -maxdepth 3 -name Makefile -print -quit | xargs dirname)
-          
-          if [ -z "$MAKE_PATH" ]; then
-            echo "错误：在仓库中完全找不到 Makefile！请检查 camellia 分支是否有代码。"
+          # 1. 自动寻找 Makefile 所在位置 (防止源码在子目录)
+          SRC_DIR=$(find . -maxdepth 3 -name Makefile -print -quit | xargs dirname)
+          if [ -z "$SRC_DIR" ]; then
+            echo "错误：找不到 Makefile，请确认分支 camellia-r-oss 中包含源码。"
             ls -R
             exit 1
           fi
-          
-          echo "找到 Makefile 位于: $MAKE_PATH"
-          cd "$MAKE_PATH"
+          cd "$SRC_DIR"
+          echo "工作目录已切换至: $(pwd)"
 
-          # 2. 准备输出目录
-          mkdir -p out
-          
-          # 3. 定义环境变量
+          # 2. 设置环境变量
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
           
-          # 4. 开始构建
+          # 3. 准备输出目录
+          mkdir -p out
+          
+          # 4. 彻底清理
           make O=out mrproper
           
-          # 5. 配置 (请确保此文件名在 arch/arm64/configs/ 下)
+          # 5. 配置 (适配小米山茶花 MTK 平台)
+          # 注意：如果报错找不到文件，请去 arch/arm64/configs/ 确认文件名
           make O=out k6833v1_64_defconfig
           
-          # 6. 编译
+          # 6. 编译 (使用 Clang)
           make -j$(nproc --all) O=out \
               CC=$CC \
               CLANG_TRIPLE=$CLANG_TRIPLE \
               CROSS_COMPILE=$CROSS_COMPILE \
               CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
 
-      - name: Upload Artifact
+      - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-Image
+          name: Camellia-Kernel-${{ github.run_id }}
           path: "**/out/arch/arm64/boot/Image*"
