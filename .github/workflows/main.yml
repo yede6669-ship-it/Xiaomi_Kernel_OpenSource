@@ -1,17 +1,22 @@
-name: Build Xiaomi Camellia Kernel (Docker Mode)
+name: Build Xiaomi Camellia Kernel (Debian Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    # 依然运行在 ubuntu 机器上，但指令会在下方的 container 内部执行
     runs-on: ubuntu-latest
+    # 切换到 Debian 11，这是四年前最稳的环境
     container:
-      # 使用专门针对安卓编译优化的镜像（Debian系），环境更接近四年前的开发机
-      image: docker.io/lineageos47/lineageos-build:latest 
+      image: debian:bullseye
 
     steps:
+      - name: Install Base Dependencies
+        run: |
+          apt-get update
+          apt-get install -y bc bison flex gperf build-essential git libelf-dev libssl-dev python3 wget tar \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
@@ -19,18 +24,17 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Setup Legacy Clang
+      - name: Setup Legacy Clang (r353983c)
         run: |
-          apt-get update && apt-get install -y wget tar
           mkdir -p /build/clang
           cd /build/clang
-          # 下载更老的、兼容性最强的 Android 10/11 时代 Clang (r353983c)
+          # 下载兼容性最好的旧版 Android Clang
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r353983c.tar.gz
           tar -xf clang-r353983c.tar.gz
 
       - name: Build Kernel
         run: |
-          # 1. 设置环境变量，强制指向我们下载的旧版 Clang
+          # 1. 设置环境变量
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH=/build/clang/bin:$PATH
@@ -42,8 +46,11 @@ jobs:
           # 3. 加载配置
           make O=out k6833v1_64_defconfig
           
-          # 4. 编译
-          # 如果源码太老，有时需要屏蔽掉一些新版编译器不认识的 flag
+          # 4. 强制修复：如果源码 Makefile 里的参数太激进，这里做一下兼容处理
+          # 这一步是为了防止之前出现的 "unknown argument" 错误
+          sed -i 's/-fstack-protector-strong//g' Makefile || true
+          
+          # 5. 编译
           make -j$(nproc --all) O=out \
               CC=clang \
               CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -59,7 +66,7 @@ jobs:
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-Docker
+          name: Camellia-Kernel-Debian
           path: |
-            **/out/arch/arm64/boot/Image*
-            **/out/arch/arm64/boot/dtbo.img
+            out/arch/arm64/boot/Image*
+            out/arch/arm64/boot/dtbo.img
