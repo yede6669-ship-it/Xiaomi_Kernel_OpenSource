@@ -26,5 +26,5 @@ jobs:
           aosp-clang-version: r383902
           disable-lto: true
           anykernel3: true
-          # 核心修复：手动补齐三元组变量，让 Makefile 自动跳过检测逻辑
-          extra-make-args: CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-
+          # 这一行是关键：在 make 启动时，强制先运行 sed 修改 Makefile
+          extra-make-args: HOSTCC=gcc $(shell sed -i '503s/$(error.*//' Makefile)
