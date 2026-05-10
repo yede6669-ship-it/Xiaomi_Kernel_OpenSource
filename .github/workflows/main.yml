@@ -22,24 +22,7 @@ jobs:
 
       - name: Build Kernel
         run: |
-          # 1. 查找包含 Makefile 的内核根目录
-          # 直接寻找包含关键配置目录的 Makefile 所在位置
-          SRC_DIR=$(find . -maxdepth 3 -name "Makefile" | xargs grep -l "arch/arm64/configs" | head -n 1 | xargs dirname)
-          
-          if [ -z "$SRC_DIR" ]; then
-            if [ -f "./Makefile" ]; then
-                SRC_DIR="."
-            else
-                echo "错误：找不到内核主源码目录！请检查分支内容。"
-                ls -R
-                exit 1
-            fi
-          fi
-          
-          cd "$SRC_DIR"
-          echo "当前工作目录: $(pwd)"
-
-          # 2. 设置环境变量 (针对小米 MTK 平台)
+          # 1. 环境变量配置
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -47,15 +30,24 @@ jobs:
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
           
-          # 3. 准备输出目录并清理
+          # 2. 准备输出目录
           mkdir -p out
+          
+          # 3. 彻底清理并加载配置
+          # 既然 Makefile 在根目录，直接在这里执行
           make O=out mrproper
           
-          # 4. 使用你指定的配置文件
-          echo "正在加载配置: k6833v1_64_defconfig"
+          echo "正在加载配置: arch/arm64/configs/k6833v1_64_defconfig"
+          if [ ! -f "arch/arm64/configs/k6833v1_64_defconfig" ]; then
+            echo "错误：根目录下找不到该配置文件！"
+            ls -R arch/arm64/configs/
+            exit 1
+          fi
+          
           make O=out k6833v1_64_defconfig
           
-          # 5. 正式编译 (使用所有 CPU 核心)
+          # 4. 正式开始编译 (使用所有核心加速)
+          # 如果这里报错 "clang: command not found"，请告诉我
           make -j$(nproc --all) O=out \
               CC=$CC \
               CLANG_TRIPLE=$CLANG_TRIPLE \
@@ -66,4 +58,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Camellia-Kernel-Output
-          path: "**/out/arch/arm64/boot/Image*"
+          path: out/arch/arm64/boot/Image*
