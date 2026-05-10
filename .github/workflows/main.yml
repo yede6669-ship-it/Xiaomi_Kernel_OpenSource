@@ -18,24 +18,25 @@ jobs:
       - name: Install Build Essentials
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 wget tar \
+          # 补充了 flex, bison, gperf 等必不可少的工具
+          sudo apt-get install -y bc bison flex gperf build-essential git libelf-dev libssl-dev python3 wget tar \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Setup Legacy Android Clang (r383902)
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang-10
           cd $GITHUB_WORKSPACE/clang-10
-          # 下载四年前 Android 11 内核最常用的 Clang 版本
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r383902.tar.gz
           tar -xf clang-r383902.tar.gz
+          # 将 clang 路径加入环境变量
           echo "$GITHUB_WORKSPACE/clang-10/bin" >> $GITHUB_PATH
 
       - name: Build Kernel
         run: |
-          # 1. 环境变量锁定
+          # 1. 环境变量
           export ARCH=arm64
           export SUBARCH=arm64
-          export CLANG_BIN=$GITHUB_WORKSPACE/clang-10/bin
+          export PATH=$GITHUB_WORKSPACE/clang-10/bin:$PATH
           
           # 2. 准备输出
           mkdir -p out
@@ -45,7 +46,7 @@ jobs:
           make O=out k6833v1_64_defconfig
           
           # 4. 正式编译
-          # 针对老内核，我们直接让 CROSS_COMPILE 指向系统 GCC，CC 指向老 Clang
+          # 显式指定所有工具链路径，防止调用系统自带的新版 LLVM
           make -j$(nproc --all) O=out \
               CC=clang \
               CLANG_TRIPLE=aarch64-linux-gnu- \
