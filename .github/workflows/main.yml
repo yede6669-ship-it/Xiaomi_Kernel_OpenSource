@@ -29,84 +29,30 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            make bc bison build-essential curl flex \
-            git libssl-dev libelf-dev \
-            python3 python3-pip cpio kmod \
+            make bc bison build-essential curl flex git \
+            libssl-dev libelf-dev python3 cpio kmod \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf \
-            liblz4-tool xz-utils zlib1g-dev libncurses5-dev \
-            zstd
+            liblz4-tool xz-utils zlib1g-dev libncurses5-dev
           aarch64-linux-gnu-gcc --version | head -1
 
-      - name: Download Neutron Clang
+      # AOSP Clang r416183b — Android 11 时代官方工具链
+      # 只需要 GLIBC_2.17，ubuntu-22.04 (GLIBC_2.35) 完全满足
+      - name: Download AOSP Clang r416183b
         run: |
           mkdir -p ${{ github.workspace }}/clang
-
-          # 用官方脚本获取最新 Neutron Clang
-          # 先尝试获取 catalogue JSON 找最新版本
-          CATALOGUE_URL="https://raw.githubusercontent.com/Neutron-Toolchains/clang-build-catalogue/main/catalogue.json"
-          
-          echo "Fetching catalogue..."
-          CATALOGUE=$(curl -fsSL "$CATALOGUE_URL" || echo "")
-
-          if [ -n "$CATALOGUE" ]; then
-            # 从 catalogue 取最新 tag
-            LATEST_TAG=$(echo "$CATALOGUE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          # catalogue 是个列表，取第一个（最新）
-          if isinstance(data, list):
-              print(data[0].get('tag_name', data[0].get('name', '')))
-          elif isinstance(data, dict):
-              keys = list(data.keys())
-              print(keys[0] if keys else '')
-          " 2>/dev/null || echo "")
-            echo "Latest tag from catalogue: $LATEST_TAG"
-          fi
-
-          # 直接用已知可用的稳定版本下载
-          # antman 是 Neutron 官方提供的下载脚本
           cd ${{ github.workspace }}/clang
-          
-          echo "Downloading via antman script..."
-          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
-          chmod +x antman
-          
-          # antman -S 同步/下载最新版本
-          bash antman -S || {
-            echo "antman failed, trying direct download..."
-            
-            # 备用：直接下载已知有效的版本
-            # 使用 GitHub API 获取最新 release
-            LATEST=$(curl -fsSL "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
-              | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['tag_name'])" 2>/dev/null || echo "")
-            
-            echo "Latest release tag: $LATEST"
-            
-            if [ -n "$LATEST" ]; then
-              ASSET_URL=$(curl -fsSL "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
-                | python3 -c "
-          import sys, json
-          r = json.load(sys.stdin)
-          for a in r.get('assets', []):
-              if a['name'].endswith('.tar.zst'):
-                  print(a['browser_download_url'])
-                  break
-          " 2>/dev/null || echo "")
-              
-              echo "Asset URL: $ASSET_URL"
-              
-              if [ -n "$ASSET_URL" ]; then
-                curl -L --progress-bar "$ASSET_URL" -o neutron-clang.tar.zst
-                tar --use-compress-program=unzstd -xf neutron-clang.tar.zst
-                rm neutron-clang.tar.zst
-              fi
-            fi
-          }
-
-          echo "=== Clang check ==="
-          ls bin/ | head -10
+          echo "Downloading AOSP Clang r416183b..."
+          curl -L --progress-bar \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r416183b.tar.gz" \
+            -o clang.tar.gz
+          echo "Extracting..."
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
+          echo "=== Clang version ==="
           bin/clang --version | head -1
+          echo "=== GLIBC requirement check ==="
+          objdump -p bin/clang | grep GLIBC | sort -u || true
 
       - name: Build kernel
         working-directory: kernel
@@ -114,6 +60,7 @@ jobs:
           export CLANG_PATH="${{ github.workspace }}/clang/bin"
           export PATH="$CLANG_PATH:$PATH"
 
+          # 关闭 warning-as-error，避免新编译器对旧代码的误判
           export KCFLAGS="-w"
           export KCPPFLAGS="-w"
 
@@ -126,20 +73,27 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
             LLVM_IAS=0"
 
+          echo "=== Clang check ==="
+          clang --version | head -1
+          aarch64-linux-gnu-gcc --version | head -1
+
+          echo "=== Generating defconfig ==="
           make $ARGS camellia_defconfig
 
+          echo "=== Fixing stackprotector config ==="
           scripts/config --file out/.config \
             --disable CONFIG_CC_STACKPROTECTOR_STRONG \
             --enable  CONFIG_CC_STACKPROTECTOR_NONE
-
           make $ARGS olddefconfig
 
+          echo "=== Building kernel ==="
           make $ARGS -j$(nproc --all) 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
+          echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS ==="
-            grep "error:" build.log | grep -v "^#" | head -80
+            grep "error:" build.log | grep -v "^#" | head -80 || true
             echo "=== LAST 200 LINES ==="
             tail -200 build.log
             exit $BUILD_EXIT
@@ -148,8 +102,11 @@ jobs:
       - name: Check output
         if: always()
         run: |
+          echo "=== Disk usage ==="
           df -h
-          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "not found"
+          echo "=== Boot files ==="
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
+          find kernel/out -name "Image*" 2>/dev/null || true
 
       - name: Upload kernel
         if: success()
