@@ -22,41 +22,40 @@ jobs:
 
       - name: Build Kernel
         run: |
-          # 1. 精确寻找内核主目录 (寻找包含 Makefile 且包含 arch 文件夹的目录)
+          # 1. 准确定位内核根目录
           SRC_DIR=$(find . -maxdepth 3 -name "Makefile" -exec test -e "{}/../arch" \; -print -quit | xargs dirname)
-          
-          # 如果上面没找到，尝试保底方案：直接检查当前目录
-          if [ -z "$SRC_DIR" ]; then
-            if [ -f "./Makefile" ]; then
-                SRC_DIR="."
-            else
-                echo "错误：找不到内核主源码目录！"
-                ls -R
-                exit 1
-            fi
-          fi
-          
+          [ -z "$SRC_DIR" ] && SRC_DIR="."
           cd "$SRC_DIR"
-          echo "工作目录已切换至内核根目录: $(pwd)"
+          
+          # 2. 自动寻找正确的 defconfig 文件
+          # 优先找 camellia，其次找 k6833
+          CONF_FILE=$(ls arch/arm64/configs/ | grep -Ei "camellia|k6833" | head -n 1)
+          
+          if [ -z "$CONF_FILE" ]; then
+            echo "错误：在 arch/arm64/configs/ 下找不到包含 camellia 或 k6833 的配置文件！"
+            echo "当前可选的配置文件有："
+            ls arch/arm64/configs/
+            exit 1
+          fi
+          echo "检测到配置文件: $CONF_FILE"
 
-          # 2. 设置环境变量
+          # 3. 设置环境变量
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CC=clang
           export CLANG_TRIPLE=aarch64-linux-gnu-
           
-          # 3. 准备输出目录
+          # 4. 准备输出目录
           mkdir -p out
           
-          # 4. 彻底清理
+          # 5. 彻底清理
           make O=out mrproper
           
-          # 5. 配置 (小米山茶花)
-          # 注意：如果在这一步报错 "No such file"，说明文件名可能不叫这个
-          make O=out k6833v1_64_defconfig
+          # 6. 使用探测到的配置文件进行配置
+          make O=out "$CONF_FILE"
           
-          # 6. 编译
+          # 7. 编译
           make -j$(nproc --all) O=out \
               CC=$CC \
               CLANG_TRIPLE=$CLANG_TRIPLE \
