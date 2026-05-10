@@ -1,9 +1,9 @@
 name: Build Xiaomi Camellia Kernel
 
 on:
-  workflow_dispatch: # 手动触发编译
+  workflow_dispatch:
   push:
-    branches: [ "main" ] # 提交代码到 main 分支时触发
+    branches: [ "main" ]
 
 jobs:
   build:
@@ -15,53 +15,49 @@ jobs:
         with:
           submodules: 'recursive'
           fetch-depth: 1
+          # 确保源码直接放在根目录，而不是子文件夹
 
-      - name: Set up Build Environment
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          # 只安装最基础的必要工具，剩下的交给编译器
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 clang lld llvm
 
       - name: Build Kernel
+        # 如果你的 Makefile 在子目录（比如 KKEE），请把下面这行改为 ./KKEE
+        working-directory: . 
         run: |
-          # 1. 定义环境变量
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export HEADER_ARCH=arm64
+          # 1. 准备输出目录
+          mkdir -p out
           
-          # 2. 设置编译器路径 (GitHub Ubuntu 自带 Clang)
-          # 如果你的源码自带编译器，请修改这里的路径
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
+          # 2. 定义环境变量
+          export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
           
-          # 3. 开始清理与配置
-          make -C $(pwd) O=out clean
-          make -C $(pwd) O=out mrproper
+          # 3. 检查 Makefile 是否存在（防止路径错误）
+          if [ ! -f Makefile ]; then
+            echo "错误：当前目录 $(pwd) 下找不到 Makefile！"
+            ls -al
+            exit 1
+          fi
+
+          # 4. 开始构建 (跳过 clean，直接 mrproper 更彻底)
+          make O=out mrproper
           
-          # 4. 生成小米 Camellia 的配置文件 (请确认文件名是否正确)
-          make -C $(pwd) O=out k6833v1_64_defconfig
+          # 5. 配置 (确认这个文件名在你 arch/arm64/configs/ 下)
+          make O=out k6833v1_64_defconfig
           
-          # 5. 正式编译 (使用所有核心加速)
-          make -j$(nproc --all) -C $(pwd) O=out \
+          # 6. 编译
+          make -j$(nproc --all) O=out \
               CC=$CC \
               CLANG_TRIPLE=$CLANG_TRIPLE \
               CROSS_COMPILE=$CROSS_COMPILE \
               CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
 
-      - name: Check Output
-        run: |
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-             echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
-          else
-             echo "Kernel image not found!"
-             exit 1
-          fi
-
-      - name: Upload Kernel Image
-        if: env.BUILD_SUCCESS == 'true'
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-Image
-          path: out/arch/arm64/boot/Image.gz-dtb
+          name: Kernel-Image
+          path: out/arch/arm64/boot/Image*
