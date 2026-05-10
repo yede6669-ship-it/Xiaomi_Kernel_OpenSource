@@ -1,4 +1,4 @@
-name: Build Xiaomi Camellia Kernel (Debian Mode)
+name: Build Xiaomi Camellia Kernel (Debian Stable)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 切换到 Debian 11，这是四年前最稳的环境
     container:
       image: debian:bullseye
 
@@ -14,7 +13,7 @@ jobs:
       - name: Install Base Dependencies
         run: |
           apt-get update
-          apt-get install -y bc bison flex gperf build-essential git libelf-dev libssl-dev python3 wget tar \
+          apt-get install -y bc bison flex gperf build-essential git libelf-dev libssl-dev python3 wget tar curl \
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Checkout Source Code
@@ -24,13 +23,17 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Setup Legacy Clang (r353983c)
+      - name: Setup Stable Clang 10
         run: |
           mkdir -p /build/clang
           cd /build/clang
-          # 下载兼容性最好的旧版 Android Clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r353983c.tar.gz
-          tar -xf clang-r353983c.tar.gz
+          # 换成这个更稳的下载源 (Android 官方 prebuilts 的同步镜像)
+          curl -LO https://raw.githubusercontent.com/ZyCromerZ/Clang/main/links/google-clang/clang-r353983c.tar.gz
+          # 获取真实下载链接并解压
+          DOWNLOAD_URL=$(cat clang-r353983c.tar.gz)
+          curl -L "$DOWNLOAD_URL" -o clang.tar.gz
+          tar -xf clang.tar.gz
+          echo "/build/clang/bin" >> $GITHUB_PATH
 
       - name: Build Kernel
         run: |
@@ -41,32 +44,31 @@ jobs:
           
           # 2. 准备输出
           mkdir -p out
-          make O=out mrproper
           
-          # 3. 加载配置
+          # 3. 强制修复 Makefile 参数 (四年前源码的通病)
+          # 批量清理掉新版 Clang 不认识或容易报错的参数
+          sed -i 's/-fstack-protector-strong//g' Makefile
+          sed -i 's/-mstack-protector-guard=sysreg//g' Makefile
+          sed -i 's/-mstack-protector-guard-reg=sp_el0//g' Makefile
+          
+          # 4. 加载配置并清理
+          make O=out mrproper
           make O=out k6833v1_64_defconfig
           
-          # 4. 强制修复：如果源码 Makefile 里的参数太激进，这里做一下兼容处理
-          # 这一步是为了防止之前出现的 "unknown argument" 错误
-          sed -i 's/-fstack-protector-strong//g' Makefile || true
-          
           # 5. 编译
+          # 针对老源码，去掉一些可能引起链接错误的 LLVM 参数，回归最稳的交叉编译写法
           make -j$(nproc --all) O=out \
               CC=clang \
               CLANG_TRIPLE=aarch64-linux-gnu- \
               CROSS_COMPILE=aarch64-linux-gnu- \
               CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-              LD=ld.lld \
-              AR=llvm-ar \
-              NM=llvm-nm \
-              OBJCOPY=llvm-objcopy \
-              OBJDUMP=llvm-objdump \
-              STRIP=llvm-strip
+              HOSTCC=gcc \
+              HOSTCXX=g++
 
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-Debian
+          name: Camellia-Kernel-Final
           path: |
             out/arch/arm64/boot/Image*
             out/arch/arm64/boot/dtbo.img
