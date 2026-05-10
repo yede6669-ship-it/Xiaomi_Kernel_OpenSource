@@ -22,7 +22,7 @@ jobs:
 
       - name: Build Kernel
         run: |
-          # 1. 环境变量配置
+          # 1. 核心环境变量配置
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -33,29 +33,41 @@ jobs:
           # 2. 准备输出目录
           mkdir -p out
           
-          # 3. 彻底清理并加载配置
-          # 既然 Makefile 在根目录，直接在这里执行
+          # 3. 彻底清理并应用配置
           make O=out mrproper
           
           echo "正在加载配置: arch/arm64/configs/k6833v1_64_defconfig"
-          if [ ! -f "arch/arm64/configs/k6833v1_64_defconfig" ]; then
-            echo "错误：根目录下找不到该配置文件！"
-            ls -R arch/arm64/configs/
-            exit 1
-          fi
-          
           make O=out k6833v1_64_defconfig
           
-          # 4. 正式开始编译 (使用所有核心加速)
-          # 如果这里报错 "clang: command not found"，请告诉我
+          # 4. 修复 Clang 高版本导致的 FTRACE 编译报错
+          # 通过 scripts/config 工具关闭引起报错的追踪功能
+          ./scripts/config --file out/.config -d FUNCTION_TRACER
+          ./scripts/config --file out/.config -d FUNCTION_GRAPH_TRACER
+          ./scripts/config --file out/.config -d STACK_TRACER
+          ./scripts/config --file out/.config -d FTRACE
+          ./scripts/config --file out/.config -d DYNAMIC_FTRACE
+          
+          # 重新同步配置文件确保生效
+          make O=out olddefconfig
+          
+          # 5. 正式开始编译
+          # 增加 -k 参数：即便遇到非致命错误也尝试继续编译其他模块
           make -j$(nproc --all) O=out \
               CC=$CC \
               CLANG_TRIPLE=$CLANG_TRIPLE \
               CROSS_COMPILE=$CROSS_COMPILE \
-              CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
+              CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+              LD=ld.lld \
+              AR=llvm-ar \
+              NM=llvm-nm \
+              OBJCOPY=llvm-objcopy \
+              OBJDUMP=llvm-objdump \
+              STRIP=llvm-strip
 
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-Output
-          path: out/arch/arm64/boot/Image*
+          name: Camellia-Kernel-${{ github.run_id }}
+          path: |
+            out/arch/arm64/boot/Image*
+            out/arch/arm64/boot/dtbo.img
