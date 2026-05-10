@@ -21,7 +21,6 @@ jobs:
     - name: 安装GCC-9和依赖
       run: |
         sudo apt-get update
-
         sudo apt-get install -y \
           gcc-9 g++-9 \
           gcc-9-aarch64-linux-gnu \
@@ -33,12 +32,8 @@ jobs:
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90
 
-        # 创建aarch64交叉编译器符号链接，让CROSS_COMPILE前缀能找到gcc-9
+        # 创建交叉编译器符号链接
         sudo ln -sf /usr/bin/aarch64-linux-gnu-gcc-9 /usr/local/bin/aarch64-linux-gnu-gcc
-
-        echo "===== 验证编译器版本 ====="
-        gcc --version
-        aarch64-linux-gnu-gcc --version
 
     - name: 下载内核源码
       run: |
@@ -49,27 +44,27 @@ jobs:
         unzip -q kernel.zip
         mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
         rm kernel.zip
-        echo "源码下载完成，大小："
-        du -sh $HOME/kernel
 
-    - name: 配置内核
+    - name: 配置内核并修复源码补丁
       run: |
         cd $HOME/kernel
-
         export ARCH=arm64
-        export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=aarch64-linux-gnu-gcc
-        export HOSTCC=gcc-9
-        export HOSTCXX=g++-9
-
+        
+        # 1. 生成基础配置
         make camellia_defconfig
         make olddefconfig
+
+        # 2. 【核心修复】：解决你遇到的 ksm_flock 强制内联失败问题
+        # 这个报错是因为 GCC 9 找不到 inline 函数体，我们将 inline 关键字移除，让链接器处理
+        sed -i 's/inline void ksm_flock/void ksm_flock/g' include/linux/keyslot-manager.h
+        sed -i 's/inline void ksm_funlock/void ksm_funlock/g' include/linux/keyslot-manager.h
+        
+        echo "✅ 已应用 ksm_flock 修复补丁"
 
     - name: 编译内核
       run: |
         cd $HOME/kernel
-
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
@@ -80,61 +75,57 @@ jobs:
         export KAFLAGS="-w"
 
         echo "===== 开始编译 ====="
+        # 使用 tee 记录完整日志，以便报错时抓取
         make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
-          echo "===== Image.gz-dtb失败，尝试只编译Image ====="
-          make -j$(nproc) Image 2>&1 | tee -a build.log || true
+          echo "===== 编译中断，尝试备选方案或检查错误 ====="
+          
+          # 如果 Image.gz-dtb 失败，尝试只编译 Image 并手动压缩
+          if [ ! -f "arch/arm64/boot/Image" ]; then
+             make -j$(nproc) Image 2>&1 | tee -a build.log || true
+          fi
 
           if [ -f "arch/arm64/boot/Image" ]; then
-            echo "压缩Image..."
             gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz
-
-            make -j$(nproc) dtbs 2>&1 | tail -50 || true
+            make -j$(nproc) dtbs || true
             DTB=$(find arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -1)
-            if [ -n "$DTB" ]; then
-              echo "合并DTB: $DTB"
-              cat arch/arm64/boot/Image.gz "$DTB" > arch/arm64/boot/Image.gz-dtb
-            else
-              cp arch/arm64/boot/Image.gz arch/arm64/boot/Image.gz-dtb
-            fi
+            [ -n "$DTB" ] && cat arch/arm64/boot/Image.gz "$DTB" > arch/arm64/boot/Image.gz-dtb
           fi
         }
 
         echo "===== 检查编译结果 ====="
         if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
           echo "✅ 成功生成 Image.gz-dtb"
-          ls -lh arch/arm64/boot/Image.gz-dtb
-        elif [ -f "arch/arm64/boot/Image" ]; then
-          echo "⚠️ 只有Image"
-          ls -lh arch/arm64/boot/Image
         else
-          # 【修改点】：在这里增强了报错日志的提取能力
-          echo "❌ 编译失败！正在定位具体的代码报错位置..."
-          echo "==================== 详细报错信息 ===================="
-          # 提取包含 error: 或 fatal error: 的行，并显示前后3行代码上下文 (-B 3 -A 3)，附带行号 (-n)
-          grep -n -B 3 -A 3 -i -E "error:|fatal error:" build.log || echo "未抓取到标准的 GCC 语法错误，可能是缺少依赖或链接错误。"
-          echo "======================================================"
-          
-          echo "===== 日志最后 50 行（仅供参考）====="
-          tail -50 build.log
+          echo "❌ 编译失败！详细错误追踪如下："
+          echo "-------------------- ERROR LOG START --------------------"
+          # 精准抓取报错的文件名、行号及原因
+          grep -n -B 3 -A 3 -i -E "error:|fatal error:" build.log || tail -n 50 build.log
+          echo "-------------------- ERROR LOG END ----------------------"
           exit 1
         fi
 
-    # 【新增点】：只在失败时触发的日志上传步骤
-    - name: 上传完整编译日志 (仅失败时)
+    - name: 上传错误日志 (仅在失败时)
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: build-error-log
+        name: full-build-log
         path: ~/kernel/build.log
 
     - name: 打包产物
+      if: success()
       run: |
         mkdir -p $HOME/output
-
         for f in Image.gz-dtb Image.gz Image; do
           if [ -f "$HOME/kernel/arch/arm64/boot/$f" ]; then
             cp "$HOME/kernel/arch/arm64/boot/$f" $HOME/output/
-            echo "已打包: $f"
+            echo "已打包产物: $f"
             break
           fi
         done
+
+    - name: 上传内核镜像
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kernel-Camellia
+        path: ~/output/*
