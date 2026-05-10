@@ -1,12 +1,16 @@
-name: Build Xiaomi Camellia Kernel (Legacy Clang)
+name: Build Xiaomi Camellia Kernel (Docker Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
+    # 依然运行在 ubuntu 机器上，但指令会在下方的 container 内部执行
     runs-on: ubuntu-latest
-    
+    container:
+      # 使用专门针对安卓编译优化的镜像（Debian系），环境更接近四年前的开发机
+      image: docker.io/lineageos47/lineageos-build:latest 
+
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -15,28 +19,21 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Install Build Essentials
+      - name: Setup Legacy Clang
         run: |
-          sudo apt-get update
-          # 补充了 flex, bison, gperf 等必不可少的工具
-          sudo apt-get install -y bc bison flex gperf build-essential git libelf-dev libssl-dev python3 wget tar \
-          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-
-      - name: Setup Legacy Android Clang (r383902)
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/clang-10
-          cd $GITHUB_WORKSPACE/clang-10
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r383902.tar.gz
-          tar -xf clang-r383902.tar.gz
-          # 将 clang 路径加入环境变量
-          echo "$GITHUB_WORKSPACE/clang-10/bin" >> $GITHUB_PATH
+          apt-get update && apt-get install -y wget tar
+          mkdir -p /build/clang
+          cd /build/clang
+          # 下载更老的、兼容性最强的 Android 10/11 时代 Clang (r353983c)
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r353983c.tar.gz
+          tar -xf clang-r353983c.tar.gz
 
       - name: Build Kernel
         run: |
-          # 1. 环境变量
+          # 1. 设置环境变量，强制指向我们下载的旧版 Clang
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH=$GITHUB_WORKSPACE/clang-10/bin:$PATH
+          export PATH=/build/clang/bin:$PATH
           
           # 2. 准备输出
           mkdir -p out
@@ -45,8 +42,8 @@ jobs:
           # 3. 加载配置
           make O=out k6833v1_64_defconfig
           
-          # 4. 正式编译
-          # 显式指定所有工具链路径，防止调用系统自带的新版 LLVM
+          # 4. 编译
+          # 如果源码太老，有时需要屏蔽掉一些新版编译器不认识的 flag
           make -j$(nproc --all) O=out \
               CC=clang \
               CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -62,7 +59,7 @@ jobs:
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-Legacy
+          name: Camellia-Kernel-Docker
           path: |
-            out/arch/arm64/boot/Image*
-            out/arch/arm64/boot/dtbo.img
+            **/out/arch/arm64/boot/Image*
+            **/out/arch/arm64/boot/dtbo.img
