@@ -1,4 +1,4 @@
-name: Build Kernel
+Name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -107,10 +107,25 @@ jobs:
           echo "⚠️ 只有Image"
           ls -lh arch/arm64/boot/Image
         else
-          echo "❌ 编译失败，显示最后100行日志："
-          tail -100 build.log
+          # 【修改点】：在这里增强了报错日志的提取能力
+          echo "❌ 编译失败！正在定位具体的代码报错位置..."
+          echo "==================== 详细报错信息 ===================="
+          # 提取包含 error: 或 fatal error: 的行，并显示前后3行代码上下文 (-B 3 -A 3)，附带行号 (-n)
+          grep -n -B 3 -A 3 -i -E "error:|fatal error:" build.log || echo "未抓取到标准的 GCC 语法错误，可能是缺少依赖或链接错误。"
+          echo "======================================================"
+          
+          echo "===== 日志最后 50 行（仅供参考）====="
+          tail -50 build.log
           exit 1
         fi
+
+    # 【新增点】：只在失败时触发的日志上传步骤
+    - name: 上传完整编译日志 (仅失败时)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-error-log
+        path: ~/kernel/build.log
 
     - name: 打包产物
       run: |
@@ -123,5 +138,3 @@ jobs:
             break
           fi
         done
-
-      
