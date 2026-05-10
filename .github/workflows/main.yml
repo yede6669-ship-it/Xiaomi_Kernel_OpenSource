@@ -56,12 +56,14 @@ jobs:
         sed -i 's/inline void ksm_flock/void ksm_flock/g' include/linux/keyslot-manager.h
         sed -i 's/inline void ksm_funlock/void ksm_funlock/g' include/linux/keyslot-manager.h
 
-        # 3. 修复 clk-mux.h 找不到的问题 (针对 Mediatek 驱动)
-        # 我们使用 find 命令查找所有可能引用该头文件的 c 文件，并将 < > 改为 " "
-        # 这样编译器会先在当前驱动目录下搜索头文件
+        # 3. 修复 Mediatek 驱动中常见的头文件包含路径错误
+        # 修复 clk-mux.h 找不到
         find drivers/clk/mediatek/ -name "*.c" -exec sed -i 's/<clk-mux.h>/"clk-mux.h"/g' {} +
         
-        echo "✅ 源码补丁应用完成"
+        # 修复 dt_idle_states.h 找不到 (解决本次报错)
+        find drivers/cpuidle/ -name "*.c" -exec sed -i 's/<dt_idle_states.h>/"dt_idle_states.h"/g' {} +
+        
+        echo "✅ 所有已知的源码补丁应用完成"
 
     - name: 编译内核
       run: |
@@ -76,7 +78,6 @@ jobs:
         export KAFLAGS="-w"
 
         echo "===== 开始编译 ====="
-        # 使用 tee 记录日志
         make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
           echo "===== 尝试备选编译方案 ====="
           if [ ! -f "arch/arm64/boot/Image" ]; then
@@ -94,8 +95,6 @@ jobs:
         echo "===== 检查编译结果 ====="
         if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
           echo "✅ 成功生成 Image.gz-dtb"
-        elif [ -f "arch/arm64/boot/Image" ]; then
-          echo "⚠️ 仅生成 Image (未合并 DTB)"
         else
           echo "❌ 编译失败！详细错误追踪如下："
           echo "-------------------- ERROR LOG START --------------------"
@@ -115,7 +114,6 @@ jobs:
       if: success()
       run: |
         mkdir -p $HOME/output
-        # 优先选择带 dtb 的版本
         for f in Image.gz-dtb Image.gz Image; do
           if [ -f "$HOME/kernel/arch/arm64/boot/$f" ]; then
             cp "$HOME/kernel/arch/arm64/boot/$f" $HOME/output/
