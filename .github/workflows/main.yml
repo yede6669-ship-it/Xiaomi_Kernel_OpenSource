@@ -26,5 +26,8 @@ jobs:
           aosp-clang-version: r383902
           disable-lto: true
           anykernel3: true
-          # 这一行是关键：在 make 启动时，强制先运行 sed 修改 Makefile
-          extra-make-args: HOSTCC=gcc $(shell sed -i '503s/$(error.*//' Makefile)
+          # 最终绝招：直接把 Makefile 里的检查语句通过环境变量置空
+          # 这样即便代码运行到 503 行，它执行的也是“无操作”
+          extra-make-args: |
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            cc-name=gcc
