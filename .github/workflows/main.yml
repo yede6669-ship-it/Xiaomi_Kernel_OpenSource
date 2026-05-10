@@ -1,7 +1,7 @@
 name: Build Xiaomi Camellia Kernel
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -11,7 +11,7 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
-          ref: camellia-r-oss # 修正为完整的分支名
+          ref: camellia-r-oss
           submodules: 'recursive'
           fetch-depth: 1
 
@@ -22,15 +22,22 @@ jobs:
 
       - name: Build Kernel
         run: |
-          # 1. 自动寻找 Makefile 所在位置 (防止源码在子目录)
-          SRC_DIR=$(find . -maxdepth 3 -name Makefile -print -quit | xargs dirname)
+          # 1. 精确寻找内核主目录 (寻找包含 Makefile 且包含 arch 文件夹的目录)
+          SRC_DIR=$(find . -maxdepth 3 -name "Makefile" -exec test -e "{}/../arch" \; -print -quit | xargs dirname)
+          
+          # 如果上面没找到，尝试保底方案：直接检查当前目录
           if [ -z "$SRC_DIR" ]; then
-            echo "错误：找不到 Makefile，请确认分支 camellia-r-oss 中包含源码。"
-            ls -R
-            exit 1
+            if [ -f "./Makefile" ]; then
+                SRC_DIR="."
+            else
+                echo "错误：找不到内核主源码目录！"
+                ls -R
+                exit 1
+            fi
           fi
+          
           cd "$SRC_DIR"
-          echo "工作目录已切换至: $(pwd)"
+          echo "工作目录已切换至内核根目录: $(pwd)"
 
           # 2. 设置环境变量
           export ARCH=arm64
@@ -45,11 +52,11 @@ jobs:
           # 4. 彻底清理
           make O=out mrproper
           
-          # 5. 配置 (适配小米山茶花 MTK 平台)
-          # 注意：如果报错找不到文件，请去 arch/arm64/configs/ 确认文件名
+          # 5. 配置 (小米山茶花)
+          # 注意：如果在这一步报错 "No such file"，说明文件名可能不叫这个
           make O=out k6833v1_64_defconfig
           
-          # 6. 编译 (使用 Clang)
+          # 6. 编译
           make -j$(nproc --all) O=out \
               CC=$CC \
               CLANG_TRIPLE=$CLANG_TRIPLE \
@@ -59,5 +66,5 @@ jobs:
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-${{ github.run_id }}
+          name: Camellia-Kernel-Output
           path: "**/out/arch/arm64/boot/Image*"
