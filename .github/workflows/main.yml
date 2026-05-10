@@ -1,43 +1,67 @@
-# A simple action usage
-name: Build Kernel
+name: Build Xiaomi Camellia Kernel
+
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发编译
+  push:
+    branches: [ "main" ] # 提交代码到 main 分支时触发
 
 jobs:
-  Build-Kernel:
-    strategy:
-      fail-fast: false
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+    
     steps:
-      # 核心操作：在 Action 运行前，先手动把 Makefile 里的报错行删了
-      - name: Pre-patch Makefile
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Set up Build Environment
         run: |
-          # 提前创建一个占位目录并克隆 Makefile 进行修改，或者直接通过 shell 注入
-          # 但最稳妥的方法是利用这个 Action 会在当前目录工作的特性
-          mkdir -p msm-4.14
-          git clone --depth 1 -b camellia-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource msm-4.14
-          cd msm-4.14
-          sed -i 's/$(error "Clang with Android --target detected. Did you specify CLANG_TRIPLE?").*//g' Makefile
+          sudo apt-get update
+          # 只安装最基础的必要工具，剩下的交给编译器
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3
 
       - name: Build Kernel
-        uses: dabao1955/kernel_build_action@main
+        run: |
+          # 1. 定义环境变量
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export HEADER_ARCH=arm64
+          
+          # 2. 设置编译器路径 (GitHub Ubuntu 自带 Clang)
+          # 如果你的源码自带编译器，请修改这里的路径
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          
+          # 3. 开始清理与配置
+          make -C $(pwd) O=out clean
+          make -C $(pwd) O=out mrproper
+          
+          # 4. 生成小米 Camellia 的配置文件 (请确认文件名是否正确)
+          make -C $(pwd) O=out k6833v1_64_defconfig
+          
+          # 5. 正式编译 (使用所有核心加速)
+          make -j$(nproc --all) -C $(pwd) O=out \
+              CC=$CC \
+              CLANG_TRIPLE=$CLANG_TRIPLE \
+              CROSS_COMPILE=$CROSS_COMPILE \
+              CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
+
+      - name: Check Output
+        run: |
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+             echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
+          else
+             echo "Kernel image not found!"
+             exit 1
+          fi
+
+      - name: Upload Kernel Image
+        if: env.BUILD_SUCCESS == 'true'
+        uses: actions/upload-artifact@v4
         with:
-          # 注意：这里我们依然保留你的 with 结构
-          kernel-url: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
-          kernel-dir: msm-4.14
-          kernel-branch: camellia-r-oss
-          config: k6833v1_64_defconfig
-          arch: arm64
-          aosp-gcc: true
-          aosp-clang: true
-          android-version: 11
-          aosp-clang-version: r383902
-          disable-lto: true
-          anykernel3: true
-          # 这里保留你最后给我的内容
-          extra-make-args: |
-            CLANG_TRIPLE=aarch64-linux-gnu-
-            cc-name=gcc
+          name: Camellia-Kernel-Image
+          path: out/arch/arm64/boot/Image.gz-dtb
