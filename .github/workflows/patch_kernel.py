@@ -230,8 +230,7 @@ try:
 except Exception as e:
     print('skip ' + string_path + ': ' + str(e))
 
-# ── Fix: imgsensor_ca_invoke_command 缺失符号，提供空实现 ─────────────────────
-imgsensor_stub_path = 'drivers/misc/mediatek/imgsensor/src/common/v1_1/imgsensor_ca_stub.c'
+# ── Fix: imgsensor_ca_invoke_command 缺失符号，搜索正确路径后注入 stub ─────────
 imgsensor_stub_impl = '''#include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/export.h>
@@ -242,26 +241,56 @@ int imgsensor_ca_invoke_command(unsigned int cmd, unsigned long long arg, int *r
 }
 EXPORT_SYMBOL(imgsensor_ca_invoke_command);
 '''
-try:
-    os.makedirs(os.path.dirname(imgsensor_stub_path), exist_ok=True)
-    if not os.path.exists(imgsensor_stub_path):
-        with open(imgsensor_stub_path, 'w') as f:
-            f.write(imgsensor_stub_impl)
-        print('created ' + imgsensor_stub_path)
-    else:
-        print('skip ' + imgsensor_stub_path + ': already exists')
-except Exception as e:
-    print('skip ' + imgsensor_stub_path + ': ' + str(e))
 
-imgsensor_mk_path = 'drivers/misc/mediatek/imgsensor/src/common/v1_1/Makefile'
-try:
-    with open(imgsensor_mk_path, 'r', errors='replace') as f:
-        mk = f.read()
-    if 'imgsensor_ca_stub.o' not in mk:
-        with open(imgsensor_mk_path, 'a') as f:
-            f.write('\nobj-y += imgsensor_ca_stub.o\n')
-        print('patched ' + imgsensor_mk_path)
-    else:
-        print('skip ' + imgsensor_mk_path + ': already patched')
-except Exception as e:
-    print('skip ' + imgsensor_mk_path + ': ' + str(e))
+# 找到 seninf.c 所在目录，stub 放在同级目录
+seninf_found = None
+for root, dirs, files in os.walk('drivers/misc/mediatek/imgsensor'):
+    dirs[:] = [d for d in dirs if d != '.git']
+    if 'seninf.c' in files:
+        seninf_found = root
+        break
+
+if seninf_found:
+    stub_path = os.path.join(seninf_found, 'imgsensor_ca_stub.c')
+    mk_path = os.path.join(seninf_found, 'Makefile')
+    try:
+        if not os.path.exists(stub_path):
+            with open(stub_path, 'w') as f:
+                f.write(imgsensor_stub_impl)
+            print('created ' + stub_path)
+        else:
+            print('skip ' + stub_path + ': already exists')
+        with open(mk_path, 'r', errors='replace') as f:
+            mk = f.read()
+        if 'imgsensor_ca_stub.o' not in mk:
+            with open(mk_path, 'a') as f:
+                f.write('\nobj-y += imgsensor_ca_stub.o\n')
+            print('patched ' + mk_path)
+        else:
+            print('skip ' + mk_path + ': already patched')
+    except Exception as e:
+        print('skip imgsensor stub: ' + str(e))
+else:
+    print('WARNING: seninf.c not found, trying fallback paths')
+    for fallback in [
+        'drivers/misc/mediatek/imgsensor/src/common/v1_1',
+        'drivers/misc/mediatek/imgsensor/src/mt6853/common/v1_1',
+        'drivers/misc/mediatek/imgsensor/src',
+    ]:
+        if os.path.isdir(fallback):
+            stub_path = os.path.join(fallback, 'imgsensor_ca_stub.c')
+            mk_path = os.path.join(fallback, 'Makefile')
+            try:
+                if not os.path.exists(stub_path):
+                    with open(stub_path, 'w') as f:
+                        f.write(imgsensor_stub_impl)
+                    print('created ' + stub_path)
+                with open(mk_path, 'r', errors='replace') as f:
+                    mk = f.read()
+                if 'imgsensor_ca_stub.o' not in mk:
+                    with open(mk_path, 'a') as f:
+                        f.write('\nobj-y += imgsensor_ca_stub.o\n')
+                    print('patched ' + mk_path)
+            except Exception as e:
+                print('skip fallback ' + fallback + ': ' + str(e))
+            break
