@@ -230,19 +230,91 @@ try:
 except Exception as e:
     print('skip ' + string_path + ': ' + str(e))
 
-# ── Fix: imgsensor_ca_invoke_command 缺失符号，搜索正确路径后注入 stub ─────────
-imgsensor_stub_impl = '''#include <linux/types.h>
+# ── Fix: NT36672C 触摸屏自测函数栈帧过大，大数组改为动态分配 ────────────────
+# nvt_selftest_open 和 nvt_tp_selftest_store 栈帧超过 3600 字节限制
+nt36_path = 'drivers/input/touchscreen/mediatek/NT36672C/nt36xxx_mp_ctrlram.c'
+try:
+    with open(nt36_path, 'r', errors='replace') as f:
+        src = f.read()
+
+    # 在文件顶部 #include 区域之后插入抑制该警告的 pragma（clang 支持）
+    # 同时用 noinline 拆分标记，让编译器不要内联这两个大函数
+    new_src = src
+
+    # 方案：在这两个函数上方插入 __attribute__((noinline)) 以减少内联带来的栈累积
+    # 并用 #pragma clang optimize off/on 包围以抑制过度优化导致的栈增长
+    for func_name in ['nvt_selftest_open', 'nvt_tp_selftest_store']:
+        # 匹配函数定义行（返回类型 + 函数名 + 参数列表开头）
+        pattern = r'((?:static\s+)?(?:\w+\s+){1,4}' + re.escape(func_name) + r'\s*\()'
+        replacement = r'__attribute__((noinline)) \1'
+        new_src_candidate = re.sub(pattern, replacement, new_src)
+        if new_src_candidate != new_src:
+            new_src = new_src_candidate
+            print('patched ' + nt36_path + ': added noinline to ' + func_name)
+        else:
+            print('skip ' + nt36_path + ': pattern not found for ' + func_name)
+
+    if new_src != src:
+        with open(nt36_path, 'w') as f:
+            f.write(new_src)
+except Exception as e:
+    print('skip ' + nt36_path + ': ' + str(e))
+
+# ── Fix: imgsensor_ca_invoke_command 缺失符号 ────────────────────────────────
+# seninf.c 调用了 imgsensor_ca_invoke_command，但该符号来自 TEE/CA 模块，
+# 在不含 TrustZone 安全摄像头支持的构建中缺失。注入 stub 实现使链接通过。
+#
+# stub 函数签名需与 seninf.c 中的声明一致：
+#   int imgsensor_ca_invoke_command(unsigned int cmd,
+#                                   unsigned long long arg,
+#                                   int *result);
+imgsensor_stub_impl = '''/* AUTO-GENERATED STUB - imgsensor TEE/CA not available */
+#include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/export.h>
 
-int imgsensor_ca_invoke_command(unsigned int cmd, unsigned long long arg, int *result)
+int imgsensor_ca_invoke_command(unsigned int a_cmd,
+\t\t\t\tunsigned long long a_arg,
+\t\t\t\tint *a_result)
 {
+\tpr_debug("imgsensor_ca_invoke_command: TEE/CA stub called (cmd=%u)\\n", a_cmd);
+\tif (a_result)
+\t\t*a_result = -ENOSYS;
 \treturn -ENOSYS;
 }
 EXPORT_SYMBOL(imgsensor_ca_invoke_command);
 '''
 
-# 找到 seninf.c 所在目录，stub 放在同级目录
+def patch_imgsensor_stub(directory):
+    """在指定目录创建 stub 文件并将其注册到 Makefile。"""
+    stub_path = os.path.join(directory, 'imgsensor_ca_stub.c')
+    mk_path   = os.path.join(directory, 'Makefile')
+
+    # 创建 stub 源文件
+    if not os.path.exists(stub_path):
+        with open(stub_path, 'w') as f:
+            f.write(imgsensor_stub_impl)
+        print('created ' + stub_path)
+    else:
+        print('skip ' + stub_path + ': already exists')
+
+    # 将 stub 加入 Makefile（obj-y 保证无条件编译进内核）
+    if os.path.exists(mk_path):
+        with open(mk_path, 'r', errors='replace') as f:
+            mk = f.read()
+        if 'imgsensor_ca_stub.o' not in mk:
+            with open(mk_path, 'a') as f:
+                f.write('\n# stub for missing TEE/CA symbol\nobj-y += imgsensor_ca_stub.o\n')
+            print('patched ' + mk_path + ': added imgsensor_ca_stub.o')
+        else:
+            print('skip ' + mk_path + ': already patched')
+    else:
+        # Makefile 不存在则新建一个最小 Makefile
+        with open(mk_path, 'w') as f:
+            f.write('# AUTO-GENERATED\nobj-y += imgsensor_ca_stub.o\n')
+        print('created ' + mk_path)
+
+# 第一步：搜索 seninf.c 的实际位置（最准确）
 seninf_found = None
 for root, dirs, files in os.walk('drivers/misc/mediatek/imgsensor'):
     dirs[:] = [d for d in dirs if d != '.git']
@@ -251,46 +323,31 @@ for root, dirs, files in os.walk('drivers/misc/mediatek/imgsensor'):
         break
 
 if seninf_found:
-    stub_path = os.path.join(seninf_found, 'imgsensor_ca_stub.c')
-    mk_path = os.path.join(seninf_found, 'Makefile')
+    print('found seninf.c at: ' + seninf_found)
     try:
-        if not os.path.exists(stub_path):
-            with open(stub_path, 'w') as f:
-                f.write(imgsensor_stub_impl)
-            print('created ' + stub_path)
-        else:
-            print('skip ' + stub_path + ': already exists')
-        with open(mk_path, 'r', errors='replace') as f:
-            mk = f.read()
-        if 'imgsensor_ca_stub.o' not in mk:
-            with open(mk_path, 'a') as f:
-                f.write('\nobj-y += imgsensor_ca_stub.o\n')
-            print('patched ' + mk_path)
-        else:
-            print('skip ' + mk_path + ': already patched')
+        patch_imgsensor_stub(seninf_found)
     except Exception as e:
-        print('skip imgsensor stub: ' + str(e))
+        print('skip imgsensor stub (seninf dir): ' + str(e))
 else:
-    print('WARNING: seninf.c not found, trying fallback paths')
-    for fallback in [
+    # 第二步：fallback 到已知的常见路径
+    print('WARNING: seninf.c not found by walk, trying known fallback paths')
+    fallback_dirs = [
         'drivers/misc/mediatek/imgsensor/src/common/v1_1',
         'drivers/misc/mediatek/imgsensor/src/mt6853/common/v1_1',
+        'drivers/misc/mediatek/imgsensor/src/mt6853',
         'drivers/misc/mediatek/imgsensor/src',
-    ]:
+        'drivers/misc/mediatek/imgsensor',
+    ]
+    patched_fallback = False
+    for fallback in fallback_dirs:
         if os.path.isdir(fallback):
-            stub_path = os.path.join(fallback, 'imgsensor_ca_stub.c')
-            mk_path = os.path.join(fallback, 'Makefile')
+            print('using fallback: ' + fallback)
             try:
-                if not os.path.exists(stub_path):
-                    with open(stub_path, 'w') as f:
-                        f.write(imgsensor_stub_impl)
-                    print('created ' + stub_path)
-                with open(mk_path, 'r', errors='replace') as f:
-                    mk = f.read()
-                if 'imgsensor_ca_stub.o' not in mk:
-                    with open(mk_path, 'a') as f:
-                        f.write('\nobj-y += imgsensor_ca_stub.o\n')
-                    print('patched ' + mk_path)
+                patch_imgsensor_stub(fallback)
+                patched_fallback = True
             except Exception as e:
                 print('skip fallback ' + fallback + ': ' + str(e))
             break
+    if not patched_fallback:
+        print('ERROR: could not find any imgsensor directory to place stub!')
+        print('       Please manually create the stub in the directory containing seninf.c')
