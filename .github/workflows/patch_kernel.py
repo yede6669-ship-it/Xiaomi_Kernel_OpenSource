@@ -206,3 +206,62 @@ try:
         print('skip ' + vcu_mk_path + ': pattern not found')
 except Exception as e:
     print('skip ' + vcu_mk_path + ': ' + str(e))
+
+# ── Fix: 为缺失的 stpcpy 提供实现 ────────────────────────────────────────────
+string_path = 'lib/string.c'
+stpcpy_impl = '''
+char *stpcpy(char *dest, const char *src)
+{
+\twhile ((*dest++ = *src++) != '\\0')
+\t\t;
+\treturn dest - 1;
+}
+EXPORT_SYMBOL(stpcpy);
+'''
+try:
+    with open(string_path, 'r', errors='replace') as f:
+        src = f.read()
+    if 'stpcpy' not in src:
+        with open(string_path, 'a') as f:
+            f.write(stpcpy_impl)
+        print('patched ' + string_path + ': added stpcpy')
+    else:
+        print('skip ' + string_path + ': stpcpy already exists')
+except Exception as e:
+    print('skip ' + string_path + ': ' + str(e))
+
+# ── Fix: imgsensor_ca_invoke_command 缺失符号，提供空实现 ─────────────────────
+imgsensor_stub_path = 'drivers/misc/mediatek/imgsensor/src/common/v1_1/imgsensor_ca_stub.c'
+imgsensor_stub_impl = '''#include <linux/types.h>
+#include <linux/errno.h>
+#include <linux/export.h>
+
+int imgsensor_ca_invoke_command(unsigned int cmd, unsigned long long arg, int *result)
+{
+\treturn -ENOSYS;
+}
+EXPORT_SYMBOL(imgsensor_ca_invoke_command);
+'''
+try:
+    os.makedirs(os.path.dirname(imgsensor_stub_path), exist_ok=True)
+    if not os.path.exists(imgsensor_stub_path):
+        with open(imgsensor_stub_path, 'w') as f:
+            f.write(imgsensor_stub_impl)
+        print('created ' + imgsensor_stub_path)
+    else:
+        print('skip ' + imgsensor_stub_path + ': already exists')
+except Exception as e:
+    print('skip ' + imgsensor_stub_path + ': ' + str(e))
+
+imgsensor_mk_path = 'drivers/misc/mediatek/imgsensor/src/common/v1_1/Makefile'
+try:
+    with open(imgsensor_mk_path, 'r', errors='replace') as f:
+        mk = f.read()
+    if 'imgsensor_ca_stub.o' not in mk:
+        with open(imgsensor_mk_path, 'a') as f:
+            f.write('\nobj-y += imgsensor_ca_stub.o\n')
+        print('patched ' + imgsensor_mk_path)
+    else:
+        print('skip ' + imgsensor_mk_path + ': already patched')
+except Exception as e:
+    print('skip ' + imgsensor_mk_path + ': ' + str(e))
