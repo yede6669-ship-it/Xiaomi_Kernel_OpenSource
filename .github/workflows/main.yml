@@ -200,8 +200,8 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
             DTC_EXT=dtc"
-          make $COMMON_FLAGS -j$(nproc --all) > build.log 2>&1
-          BUILD_EXIT=$?
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
           echo "=== Build exit code: $BUILD_EXIT ==="
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== ERRORS ==="
