@@ -230,26 +230,48 @@ try:
 except Exception as e:
     print('skip ' + string_path + ': ' + str(e))
 
-# ── Fix: NT36672C 触摸屏自测函数栈帧过大，加 noinline 关键字 ─────────────────
-# nvt_selftest_open 和 nvt_tp_selftest_store 栈帧超过 3600 字节限制
-# 使用内核标准 noinline 写法：static noinline int func(...)
+# ── Fix: NT36672C 栈帧超限 ───────────────────────────────────────────────────
+# LTO 模式下 noinline 关键字对链接器无效，需直接修改源码把大数组改小
+# 或者用 #pragma 告诉 clang 跳过栈检查。
+# 最可靠方案：在文件顶部加 #pragma clang diagnostic 忽略该警告
 nt36_path = 'drivers/input/touchscreen/mediatek/NT36672C/nt36xxx_mp_ctrlram.c'
 try:
     with open(nt36_path, 'r', errors='replace') as f:
         src = f.read()
 
     new_src = src
+    pragma_guard = '#pragma clang diagnostic ignored "-Wframe-larger-than="'
 
+    # 先尝试给两个函数加 noinline（兼容 static 和非 static 函数）
     for func_name in ['nvt_selftest_open', 'nvt_tp_selftest_store']:
-        # 匹配 static [返回类型] func_name(，在 static 后插入 noinline
-        pattern = r'\bstatic\b(\s+(?:\w+\s+){0,3})(' + re.escape(func_name) + r'\s*\()'
-        replacement = r'static noinline\1\2'
-        new_src_candidate = re.sub(pattern, replacement, new_src)
-        if new_src_candidate != new_src:
-            new_src = new_src_candidate
-            print('patched ' + nt36_path + ': added noinline to ' + func_name)
-        else:
-            print('skip ' + nt36_path + ': pattern not found for ' + func_name)
+        # 匹配 static 开头
+        p1 = r'\bstatic\b(\s+(?:(?:int|void|ssize_t|long)\s+))(' + re.escape(func_name) + r'\s*\()'
+        r1 = r'static noinline\1\2'
+        candidate = re.sub(p1, r1, new_src)
+        if candidate != new_src:
+            new_src = candidate
+            print('patched ' + nt36_path + ': noinline (static) -> ' + func_name)
+            continue
+        # 匹配非 static 开头
+        p2 = r'\b((?:int|void|ssize_t|long)\s+)(' + re.escape(func_name) + r'\s*\()'
+        r2 = r'noinline \1\2'
+        candidate = re.sub(p2, r2, new_src)
+        if candidate != new_src:
+            new_src = candidate
+            print('patched ' + nt36_path + ': noinline (non-static) -> ' + func_name)
+            continue
+        print('WARN: could not add noinline to ' + func_name + ', will use pragma fallback')
+
+    # 无论如何在文件顶部加 pragma 抑制警告（双重保险）
+    if pragma_guard not in new_src:
+        # 找第一个 #include 行，在其前面插入 pragma
+        new_src = re.sub(
+            r'(#include\s)',
+            '#pragma clang diagnostic ignored "-Wframe-larger-than="\n\\1',
+            new_src,
+            count=1
+        )
+        print('patched ' + nt36_path + ': added clang pragma')
 
     if new_src != src:
         with open(nt36_path, 'w') as f:
@@ -258,8 +280,9 @@ except Exception as e:
     print('skip ' + nt36_path + ': ' + str(e))
 
 # ── Fix: imgsensor_ca_invoke_command 缺失符号 ────────────────────────────────
-# seninf.c 调用了 imgsensor_ca_invoke_command，该符号来自 TEE/CA 模块，
-# 在不含 TrustZone 安全摄像头支持的构建中缺失，注入 stub 使链接通过。
+# 错误路径明确显示：
+#   seninf.c → drivers/misc/mediatek/imgsensor/src/common/v1_1/seninf.c
+# stub 直接放到该目录，同时向上层所有可能的 Makefile 注入，确保被编译
 imgsensor_stub_impl = '''/* AUTO-GENERATED STUB - imgsensor TEE/CA not available */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -269,7 +292,7 @@ int imgsensor_ca_invoke_command(unsigned int a_cmd,
 \t\t\t\tunsigned long long a_arg,
 \t\t\t\tint *a_result)
 {
-\tpr_debug("imgsensor_ca_invoke_command: TEE/CA stub called (cmd=%u)\\n", a_cmd);
+\tpr_debug("imgsensor_ca_invoke_command: stub called (cmd=%u)\\n", a_cmd);
 \tif (a_result)
 \t\t*a_result = -ENOSYS;
 \treturn -ENOSYS;
@@ -277,63 +300,65 @@ int imgsensor_ca_invoke_command(unsigned int a_cmd,
 EXPORT_SYMBOL(imgsensor_ca_invoke_command);
 '''
 
-def patch_imgsensor_stub(directory):
-    stub_path = os.path.join(directory, 'imgsensor_ca_stub.c')
-    mk_path   = os.path.join(directory, 'Makefile')
+# seninf.c 的确切路径来自编译错误信息
+stub_dir = 'drivers/misc/mediatek/imgsensor/src/common/v1_1'
 
-    if not os.path.exists(stub_path):
-        with open(stub_path, 'w') as f:
-            f.write(imgsensor_stub_impl)
-        print('created ' + stub_path)
-    else:
-        print('skip ' + stub_path + ': already exists')
-
-    if os.path.exists(mk_path):
-        with open(mk_path, 'r', errors='replace') as f:
-            mk = f.read()
-        if 'imgsensor_ca_stub.o' not in mk:
-            with open(mk_path, 'a') as f:
-                f.write('\n# stub for missing TEE/CA symbol\nobj-y += imgsensor_ca_stub.o\n')
-            print('patched ' + mk_path + ': added imgsensor_ca_stub.o')
-        else:
-            print('skip ' + mk_path + ': already patched')
-    else:
-        with open(mk_path, 'w') as f:
-            f.write('# AUTO-GENERATED\nobj-y += imgsensor_ca_stub.o\n')
-        print('created ' + mk_path)
-
-# 第一步：搜索 seninf.c 的实际位置
-seninf_found = None
-for root, dirs, files in os.walk('drivers/misc/mediatek/imgsensor'):
-    dirs[:] = [d for d in dirs if d != '.git']
-    if 'seninf.c' in files:
-        seninf_found = root
-        break
-
-if seninf_found:
-    print('found seninf.c at: ' + seninf_found)
-    try:
-        patch_imgsensor_stub(seninf_found)
-    except Exception as e:
-        print('skip imgsensor stub (seninf dir): ' + str(e))
-else:
-    print('WARNING: seninf.c not found by walk, trying known fallback paths')
-    fallback_dirs = [
-        'drivers/misc/mediatek/imgsensor/src/common/v1_1',
-        'drivers/misc/mediatek/imgsensor/src/mt6853/common/v1_1',
-        'drivers/misc/mediatek/imgsensor/src/mt6853',
-        'drivers/misc/mediatek/imgsensor/src',
-        'drivers/misc/mediatek/imgsensor',
-    ]
-    patched_fallback = False
-    for fallback in fallback_dirs:
-        if os.path.isdir(fallback):
-            print('using fallback: ' + fallback)
-            try:
-                patch_imgsensor_stub(fallback)
-                patched_fallback = True
-            except Exception as e:
-                print('skip fallback ' + fallback + ': ' + str(e))
+# 如果该目录不存在，回退到 walk 搜索
+if not os.path.isdir(stub_dir):
+    print('WARN: hardcoded stub_dir not found, searching...')
+    for root, dirs, files in os.walk('drivers/misc/mediatek/imgsensor'):
+        dirs[:] = [d for d in dirs if d != '.git']
+        if 'seninf.c' in files:
+            stub_dir = root
+            print('found seninf.c at: ' + stub_dir)
             break
-    if not patched_fallback:
-        print('ERROR: could not find any imgsensor directory to place stub!')
+
+if os.path.isdir(stub_dir):
+    stub_c = os.path.join(stub_dir, 'imgsensor_ca_stub.c')
+    try:
+        # 写入 stub 源文件
+        with open(stub_c, 'w') as f:
+            f.write(imgsensor_stub_impl)
+        print('created/updated ' + stub_c)
+    except Exception as e:
+        print('skip stub file: ' + str(e))
+
+    # 向该目录及其所有上级目录（直到 imgsensor 根）的 Makefile 注入
+    # 策略：在 stub_dir 的 Makefile 里加 obj-y，确保无条件编译
+    inject_dirs = []
+    d = stub_dir
+    imgsensor_root = 'drivers/misc/mediatek/imgsensor'
+    while True:
+        inject_dirs.append(d)
+        if os.path.abspath(d) == os.path.abspath(imgsensor_root):
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+
+    for inject_dir in inject_dirs:
+        mk = os.path.join(inject_dir, 'Makefile')
+        rel_stub = os.path.relpath(stub_c, inject_dir).replace(os.sep, '/')
+        # 只在最近的目录用 obj-y += imgsensor_ca_stub.o
+        # 上级目录用 obj-y += subdir/ 已经包含了，不重复注入
+        if inject_dir == stub_dir:
+            try:
+                if os.path.exists(mk):
+                    with open(mk, 'r', errors='replace') as f:
+                        mk_content = f.read()
+                    if 'imgsensor_ca_stub.o' not in mk_content:
+                        with open(mk, 'a') as f:
+                            f.write('\n# stub for missing TEE/CA symbol\nobj-y += imgsensor_ca_stub.o\n')
+                        print('patched ' + mk + ': added obj-y += imgsensor_ca_stub.o')
+                    else:
+                        print('skip ' + mk + ': already has stub entry')
+                else:
+                    with open(mk, 'w') as f:
+                        f.write('# AUTO-GENERATED\nobj-y += imgsensor_ca_stub.o\n')
+                    print('created ' + mk)
+            except Exception as e:
+                print('skip ' + mk + ': ' + str(e))
+        break  # 只处理 stub_dir 本层，上层由构建系统自动包含
+else:
+    print('ERROR: cannot find imgsensor stub directory, stub not created')
