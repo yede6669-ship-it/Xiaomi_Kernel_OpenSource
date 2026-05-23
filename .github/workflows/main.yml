@@ -1,342 +1,213 @@
-name: Build KernelSU with GCC-8
+name: Build Camellia Kernel
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+env:
+  CLANG_DIR: ${{ github.workspace }}/toolchain/clang
 
 jobs:
   build:
-    runs-on: ubuntu-20.04  # 使用旧版Ubuntu获得更好兼容性
-    timeout-minutes: 120
+    name: Build Kernel (camellia-r-oss)
+    runs-on: ubuntu-24.04
 
     steps:
-    - name: 检出仓库
-      uses: actions/checkout@v4
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+        with:
+          path: scripts_repo
 
-    - name: 清理磁盘空间
-      run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-        sudo apt-get clean && sudo apt-get autoremove -y
-        df -h
+      - name: Cache kernel source tree
+        id: cache-kernel-src
+        uses: actions/cache@v4
+        with:
+          path: kernel
+          key: kernel-src-camellia-r-oss-v1
 
-    - name: 安装GCC-8和依赖
-      run: |
-        # 添加旧版本源
-        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-        sudo apt update
+      - name: Checkout kernel source
+        if: steps.cache-kernel-src.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: MiCode/Xiaomi_Kernel_OpenSource
+          ref: camellia-r-oss
+          path: kernel
+          fetch-depth: 1
 
-        # 安装gcc-8和aarch64交叉编译器
-        sudo apt install -y gcc-8 g++-8 gcc-8-aarch64-linux-gnu g++-8-aarch64-linux-gnu
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabihf \
+            make bc bison build-essential ccache curl flex \
+            git gnupg gperf wget tar \
+            liblz4-tool libncurses5-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush \
+            rsync libglib2.0-dev schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python3-pip cpio kmod ca-certificates \
+            zstd patchelf device-tree-compiler
+          aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-as --version | head -1
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CLANG_DIR }}
+          key: clang-neutron-${{ runner.os }}-v1
 
-        # 设置gcc-8为默认
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80
-        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-8 80
+      - name: Download Clang toolchain via AntMan
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ env.CLANG_DIR }}
+          cd ${{ env.CLANG_DIR }}
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          chmod +x bin/*
+          bin/clang --version | head -1
+      - name: Verify Clang toolchain
+        run: |
+          chmod +x ${{ env.CLANG_DIR }}/bin/*
+          ${{ env.CLANG_DIR }}/bin/clang --version | head -1
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 2G
+          key: camellia-r-oss-${{ runner.os }}
 
-        # 安装其他依赖
-        sudo apt install -y bc bison build-essential curl flex git libssl-dev \
-          wget python3 device-tree-compiler libncurses5-dev make
-
-        # 验证版本
-        gcc --version
-        aarch64-linux-gnu-gcc-8 --version
-
-    - name: 下载源码
-      run: |
-        cd $HOME
-
-        # 下载内核
-        wget -q --show-progress \
-          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-          -O kernel.zip
-        unzip -q kernel.zip
-        mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
-        rm kernel.zip
-
-        # 下载KernelSU 0.9.5 (最后支持非GKI的版本)
-        wget -q --show-progress \
-          https://github.com/tiann/KernelSU/archive/refs/tags/v0.9.5.zip \
-          -O kernelsu.zip
-        unzip -q kernelsu.zip
-        mv KernelSU-0.9.5 KernelSU
-        rm kernelsu.zip
-
-    - name: 修复内核源码问题
-      run: |
-        cd $HOME/kernel
-
-        echo "===== 修复头文件包含问题 ====="
-
-        # 修复dt_idle_states.h包含
-        find . -type f -name "*.c" -exec grep -l "dt_idle_states.h" {} \; | while read file; do
-          echo "修复: $file"
-          sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' "$file"
-        done
-
-        # 修复clk-mux.h包含
-        find drivers/clk -type f -name "*.c" -exec grep -l "clk-mux.h" {} \; | while read file; do
-          echo "修复: $file"
-          sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' "$file"
-        done
-
-        # 修复其他MediaTek特定头文件
-        find drivers -type f -name "*.c" | xargs grep -l "#include <.*\.h>" | while read file; do
-          # 检查是否是本地头文件（同目录下存在）
-          grep "#include <.*\.h>" "$file" | sed 's/.*<\(.*\.h\)>.*/\1/' | while read header; do
-            dir=$(dirname "$file")
-            if [ -f "$dir/$header" ]; then
-              echo "修复本地头文件: $file -> $header"
-              sed -i "s/#include <$header>/#include \"$header\"/g" "$file"
-            fi
-          done
-        done
-
-        # 创建缺失的头文件符号链接
-        if [ -f "drivers/cpuidle/dt_idle_states.h" ] && [ ! -f "include/linux/dt_idle_states.h" ]; then
-          ln -s ../../drivers/cpuidle/dt_idle_states.h include/linux/dt_idle_states.h
-        fi
-
-        echo "===== 禁用有问题的驱动 ====="
-
-        # 注释掉有问题的函数调用
-        if [ -f "block/blk-crypto.c" ]; then
-          sed -i 's/\(.*ksm_flock.*\)/\/\/ \1/g' block/blk-crypto.c
-          sed -i 's/\(.*ksm_funlock.*\)/\/\/ \1/g' block/blk-crypto.c
-        fi
-
-    - name: 集成KernelSU
-      run: |
-        cd $HOME/kernel
-
-        # 复制KernelSU代码
-        cp -r $HOME/KernelSU/kernel drivers/kernelsu
-
-        # 添加到Makefile
-        echo 'obj-y += kernelsu/' >> drivers/Makefile
-
-        # 添加到Kconfig
-        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-
-    - name: 配置内核
-      run: |
-        cd $HOME/kernel
-
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=aarch64-linux-gnu-gcc-8
-
-        # 生成默认配置
-        make camellia_defconfig
-
-        # 添加KernelSU和必要配置
-        cat >> .config << 'CONFIG_EOF'
-        CONFIG_KSU=y
-        CONFIG_KPROBES=y
-        CONFIG_HAVE_KPROBES=y
-        CONFIG_KPROBE_EVENTS=y
-
-        # 禁用问题功能
-        CONFIG_CC_STACKPROTECTOR_STRONG=n
-        CONFIG_CPU_IDLE_GOV_MENU=n
-        CONFIG_BLK_INLINE_ENCRYPTION=n
-        CONFIG_FS_ENCRYPTION_INLINE_CRYPT=n
-        CONFIG_EOF
-
-        # 更新配置
-        make olddefconfig
-
-    - name: 编译内核
-      run: |
-        cd $HOME/kernel
-
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=aarch64-linux-gnu-gcc-8
-        export HOSTCC=gcc-8
-        export HOSTCXX=g++-8
-
-        # 添加编译参数以忽略警告
-        export KCFLAGS="-w"
-        export KAFLAGS="-w"
-
-        echo "===== 开始编译 ====="
-
-        # 尝试完整编译
-        make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
-          echo ""
-          echo "===== 完整编译失败，尝试分步编译 ====="
-
-          # 先编译Image
-          make -j$(nproc) Image 2>&1 | tail -200 || true
-
-          # 再编译dtbs
-          make -j$(nproc) dtbs 2>&1 | tail -200 || true
-
-          # 手动合并
-          if [ -f "arch/arm64/boot/Image" ]; then
-            echo "压缩Image..."
-            gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz
-
-            # 查找dtb
-            DTB=$(find arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -1)
-            if [ -n "$DTB" ]; then
-              echo "合并DTB: $DTB"
-              cat arch/arm64/boot/Image.gz "$DTB" > arch/arm64/boot/Image.gz-dtb
-            else
-              echo "未找到DTB，使用假DTB"
-              echo "DTB_PLACEHOLDER" > fake.dtb
-              cat arch/arm64/boot/Image.gz fake.dtb > arch/arm64/boot/Image.gz-dtb
-            fi
+      - name: Install assembler wrapper
+        run: |
+          bash ${{ github.workspace }}/scripts_repo/.github/workflows/make_as_wrapper.sh \
+            ${{ env.CLANG_DIR }}/bin
+          echo "PATH check:"
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          which as
+          as --version | head -1
+      - name: Patch kernel source
+        working-directory: kernel
+        run: |
+          echo ">>> [1] patch_kernel.py"
+          python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_kernel.py
+          echo ">>> [2] patch_stackprotector.py"
+          python3 ${{ github.workspace }}/scripts_repo/.github/workflows/patch_stackprotector.py
+      - name: Generate defconfig and fix .config
+        working-directory: kernel
+        timeout-minutes: 10
+        run: |
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=/usr/bin/as \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc \
+            KCONFIG_NOTIMESTAMP=1"
+          echo ">>> 确认 as 指向包装器"
+          which as && as --version | head -1
+          echo ">>> 先单独编译 kconfig 工具"
+          make $COMMON_FLAGS scripts/kconfig/conf 2>&1 &
+          KCONFIG_PID=$!
+          sleep 30
+          if kill -0 $KCONFIG_PID 2>/dev/null; then
+            echo "!!! kconfig 编译 30 秒后仍未完成，打印进程树 !!!"
+            ps auxf || true
+            kill $KCONFIG_PID || true
+            exit 1
           fi
-        }
+          wait $KCONFIG_PID
+          echo ">>> kconfig 编译完成"
+          echo ">>> 生成 defconfig"
+          make $COMMON_FLAGS camellia_defconfig < /dev/null 2>&1
+          echo ">>> defconfig 完成"
+          echo ">>> 修改 .config：STACKPROTECTOR_STRONG -> NONE"
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_REGULAR=y/# CONFIG_CC_STACKPROTECTOR_REGULAR is not set/' out/.config
+          sed -i '/^CONFIG_CC_STACKPROTECTOR_NONE/d' out/.config
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> out/.config
+          echo ">>> olddefconfig"
+          make $COMMON_FLAGS olddefconfig < /dev/null
+          grep "STACKPROTECTOR" out/.config || true
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          export PATH="${{ env.CLANG_DIR }}/bin:${PATH}"
+          echo ">>> 确认 as 指向包装器"
+          which as && as --version | head -1
+          COMMON_FLAGS="O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            STRIP=llvm-strip \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            HOSTLD=ld \
+            HOSTAS=/usr/bin/as \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=dtc"
+          make $COMMON_FLAGS -j$(nproc --all) 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          echo "=== Build exit code: $BUILD_EXIT ==="
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "=== ERRORS ==="
+            grep -n " error:" build.log | head -100 || true
+            exit $BUILD_EXIT
+          fi
+      - name: Check build output
+        if: always()
+        run: |
+          ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
+          find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
+      - name: Upload kernel image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellia-kernel-${{ github.run_number }}
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
+          retention-days: 7
 
-        # 检查结果
-        echo ""
-        echo "===== 检查编译结果 ====="
-
-        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "✅ 成功生成Image.gz-dtb"
-          ls -lh arch/arm64/boot/Image.gz-dtb
-        elif [ -f "arch/arm64/boot/Image" ]; then
-          echo "⚠️ 只有Image，创建压缩版本"
-          gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz-dtb
-          ls -lh arch/arm64/boot/Image.gz-dtb
-        else
-          echo "❌ 编译失败"
-          echo "显示错误日志："
-          tail -100 build.log
-          exit 1
-        fi
-
-    - name: 打包产物
-      run: |
-        mkdir -p output
-
-        # 复制内核
-        if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
-          cp "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" output/
-          echo "内核大小: $(ls -lh output/Image.gz-dtb | awk '{print $5}')"
-        fi
-
-        cd output
-
-        # 尝试下载magiskboot（多个源）
-        echo "下载magiskboot..."
-        wget -q https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-26.4.apk || \
-        wget -q https://ghproxy.com/https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-26.4.apk || \
-        echo "MAGISKBOOT_DOWNLOAD_FAILED" > magiskboot_error.txt
-
-        if [ -f "Magisk-26.4.apk" ]; then
-          unzip -q -j Magisk-26.4.apk 'lib/x86_64/libmagiskboot.so'
-          mv libmagiskboot.so magiskboot
-          chmod +x magiskboot
-          rm Magisk-26.4.apk
-        fi
-
-        # 创建打包脚本
-        cat > make_boot.sh << 'SCRIPT_EOF'
-        #!/bin/bash
-        echo "KernelSU Boot.img 制作工具"
-        echo "=========================="
-
-        if [ ! -f boot.img ]; then
-          echo "错误：请放入原版boot.img"
-          exit 1
-        fi
-
-        if [ ! -f magiskboot ]; then
-          echo "警告：magiskboot未找到，请手动下载"
-          echo "下载地址：https://github.com/topjohnwu/Magisk/releases"
-          exit 1
-        fi
-
-        ./magiskboot unpack boot.img
-        cp Image.gz-dtb kernel
-        ./magiskboot repack boot.img
-
-        echo ""
-        echo "✅ 完成！生成文件：new-boot.img"
-        echo ""
-        echo "刷入方法："
-        echo "  fastboot flash boot new-boot.img"
-        echo ""
-        echo "注意事项："
-        echo "1. 请先备份原版boot.img"
-        echo "2. 首次启动可能较慢"
-        echo "3. 刷入后安装KernelSU管理器APP"
-        SCRIPT_EOF
-        chmod +x make_boot.sh
-
-        # 创建说明文件
-        cat > README.txt << 'README_EOF'
-        KernelSU内核 - 红米Note 10 5G (camellia)
-        ========================================
-
-        版本信息：
-        - 基于小米官方camellia-r-oss内核源码
-        - 集成KernelSU 0.9.5（最后支持非GKI设备的版本）
-        - 使用GCC 8编译以提高兼容性
-
-        文件说明：
-        - Image.gz-dtb: 编译好的内核文件
-        - make_boot.sh: 打包脚本
-        - magiskboot: 打包工具（如果下载成功）
-
-        使用步骤：
-        1. 提取你手机的原版boot.img
-           adb shell su -c dd if=/dev/block/by-name/boot of=/sdcard/boot.img
-           adb pull /sdcard/boot.img
-
-        2. 将boot.img放到本目录
-
-        3. 运行打包脚本
-           ./make_boot.sh
-
-        4. 刷入新内核
-           adb reboot bootloader
-           fastboot flash boot new-boot.img
-           fastboot reboot
-
-        5. 安装KernelSU管理器
-           从 https://github.com/tiann/KernelSU/releases 下载APK
-
-        重要提醒：
-        ⚠️ 刷机有风险，请确保：
-        - 已解锁Bootloader
-        - 已备份原版boot.img
-        - 知道如何进入fastboot救砖
-        - 电量充足（>50%）
-
-        如果变砖：
-        fastboot flash boot boot_backup.img
-        README_EOF
-
-        ls -lah
-
-    - name: 上传产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: KernelSU-Camellia-GCC8
-        path: output/
-
-    - name: 生成摘要
-      run: |
-        echo "# 🎉 KernelSU内核编译" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-
-        if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
-          SIZE=$(ls -lh $HOME/kernel/arch/arm64/boot/Image.gz-dtb | awk '{print $5}')
-          echo "## ✅ 编译成功" >> $GITHUB_STEP_SUMMARY
-          echo "- 内核大小: $SIZE" >> $GITHUB_STEP_SUMMARY
-          echo "- KernelSU版本: 0.9.5" >> $GITHUB_STEP_SUMMARY
-          echo "- 编译器: GCC 8" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "## ⚠️ 编译未完成" >> $GITHUB_STEP_SUMMARY
-          echo "请查看日志了解详情" >> $GITHUB_STEP_SUMMARY
-        fi
-
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## 📱 支持设备" >> $GITHUB_STEP_SUMMARY
-        echo "- 红米Note 10 5G (camellia)" >> $GITHUB_STEP_SUMMARY
-        echo "- 红米Note 10T 5G" >> $GITHUB_STEP_SUMMARY
-        echo "- POCO M3 Pro 5G" >> $GITHUB_STEP_SUMMARY
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/build.log
+          if-no-files-found: ignore
+          retention-days: 3
