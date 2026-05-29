@@ -239,7 +239,6 @@ try:
     new_src = src
 
     for func_name in ['nvt_selftest_open', 'nvt_tp_selftest_store']:
-        # 匹配 static 开头
         p1 = r'\bstatic\b(\s+(?:(?:int|void|ssize_t|long)\s+))(' + re.escape(func_name) + r'\s*\()'
         r1 = r'static noinline\1\2'
         candidate = re.sub(p1, r1, new_src)
@@ -247,7 +246,6 @@ try:
             new_src = candidate
             print('patched ' + nt36_path + ': noinline (static) -> ' + func_name)
             continue
-        # 匹配非 static 开头
         p2 = r'\b((?:int|void|ssize_t|long)\s+)(' + re.escape(func_name) + r'\s*\()'
         r2 = r'noinline \1\2'
         candidate = re.sub(p2, r2, new_src)
@@ -257,7 +255,6 @@ try:
             continue
         print('WARN: could not add noinline to ' + func_name)
 
-    # 双重保险：pragma 抑制栈帧警告
     pragma_guard = '#pragma clang diagnostic ignored "-Wframe-larger-than="'
     if pragma_guard not in new_src:
         new_src = re.sub(
@@ -274,22 +271,8 @@ try:
 except Exception as e:
     print('skip ' + nt36_path + ': ' + str(e))
 
-# ── Fix: imgsensor_ca_invoke_command 缺失符号 ────────────────────────────────
-# 直接把 stub 定义注入 seninf.c 末尾，seninf.c 本身一定被编译，
-# 所以不依赖任何 Makefile 层级，100% 生效。
-seninf_stub = '''
-/* AUTO-GENERATED STUB - imgsensor_ca_invoke_command not available */
-#ifndef CONFIG_IMGSENSOR_CA
-int imgsensor_ca_invoke_command(unsigned int a_cmd,
-                                unsigned long long a_arg,
-                                int *a_result)
-{
-\tif (a_result)
-\t\t*a_result = -ENOSYS;
-\treturn -ENOSYS;
-}
-#endif /* CONFIG_IMGSENSOR_CA */
-'''
+# ── Fix: imgsensor_ca_invoke_command 缺失/冲突符号 ───────────────────────────
+# 不注入 stub 定义（会导致签名冲突），改为用 #ifdef 包住调用点和 extern 声明
 
 seninf_candidates = [
     'drivers/misc/mediatek/imgsensor/src/common/v1_1/seninf.c',
@@ -299,7 +282,6 @@ seninf_candidates = [
 
 seninf_paths = [p for p in seninf_candidates if os.path.exists(p)]
 
-# walk 兜底
 if not seninf_paths:
     for root, dirs, files in os.walk('drivers/misc/mediatek/imgsensor'):
         dirs[:] = [d for d in dirs if d != '.git']
@@ -311,24 +293,37 @@ if seninf_paths:
         try:
             with open(seninf_path, 'r', errors='replace') as f:
                 src = f.read()
-            if 'AUTO-GENERATED STUB' in src:
-                print('skip ' + seninf_path + ': already patched')
+
+            if 'AUTO-PATCHED-IFDEF' in src:
+                print('skip ' + seninf_path + ': 已打过补丁')
                 continue
-            # 确认有调用但无定义
-            has_call = 'imgsensor_ca_invoke_command' in src
-            has_def = bool(re.search(
-                r'^\s*int\s+imgsensor_ca_invoke_command\s*\(',
-                src, re.MULTILINE
-            ))
-            if has_call and not has_def:
-                with open(seninf_path, 'a') as f:
-                    f.write(seninf_stub)
-                print('patched ' + seninf_path + ': injected imgsensor_ca stub')
-            elif has_def:
-                print('skip ' + seninf_path + ': definition already present')
+
+            new_src = src
+
+            # 1. 把 extern 声明用 #ifdef 包起来，避免签名冲突
+            new_src = re.sub(
+                r'(?m)^([ \t]*extern\s+int\s+imgsensor_ca_invoke_command\s*\([^;]+;\s*)$',
+                '#ifdef CONFIG_IMGSENSOR_CA /* AUTO-PATCHED-IFDEF */\n\\1\n#endif',
+                new_src
+            )
+
+            # 2. 把每一处调用语句用 #ifdef 包起来
+            new_src = re.sub(
+                r'(?m)^([ \t]*)((?:\w+\s*=\s*)?imgsensor_ca_invoke_command\s*\([^;]+;\s*)$',
+                '#ifdef CONFIG_IMGSENSOR_CA /* AUTO-PATCHED-IFDEF */\n\\1\\2\n#endif',
+                new_src
+            )
+
+            if new_src != src:
+                with open(seninf_path, 'w') as f:
+                    f.write(new_src)
+                print('patched ' + seninf_path + ': 已用 #ifdef 包住调用点')
             else:
-                print('skip ' + seninf_path + ': symbol not referenced here')
+                count = src.count('imgsensor_ca_invoke_command')
+                print('WARN ' + seninf_path + ': regex 未匹配，该符号出现 '
+                      + str(count) + ' 次，请检查调用是否跨行')
+
         except Exception as e:
             print('skip ' + seninf_path + ': ' + str(e))
 else:
-    print('ERROR: seninf.c not found anywhere, stub not injected')
+    print('ERROR: 找不到 seninf.c，补丁未注入')
