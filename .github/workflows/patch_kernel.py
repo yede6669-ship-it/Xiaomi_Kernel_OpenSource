@@ -1,4 +1,4 @@
-import re, os
+import re, os, subprocess, shutil
 
 def safe_remove_werror(text):
     lines = text.split('\n')
@@ -272,8 +272,6 @@ except Exception as e:
     print('skip ' + nt36_path + ': ' + str(e))
 
 # ── Fix: imgsensor_ca_invoke_command 链接期缺失符号 ──────────────────────────
-# 用逐行扫描替代 regex，正确处理跨行调用
-
 seninf_candidates = [
     'drivers/misc/mediatek/imgsensor/src/common/v1_1/seninf.c',
     'drivers/misc/mediatek/imgsensor/src/mt6853/common/v1_1/seninf.c',
@@ -306,13 +304,11 @@ if seninf_paths:
                 line = lines[i]
 
                 if 'imgsensor_ca_invoke_command' in line:
-                    # 收集完整语句直到遇到分号（处理跨行）
                     block = line
                     j = i + 1
                     while ';' not in block and j < len(lines):
                         block += lines[j]
                         j += 1
-
                     new_lines.append('#ifdef CONFIG_IMGSENSOR_CA /* AUTO-PATCHED-IFDEF */\n')
                     new_lines.append(block)
                     new_lines.append('#endif /* CONFIG_IMGSENSOR_CA */\n')
@@ -328,9 +324,99 @@ if seninf_paths:
                     f.writelines(new_lines)
                 print('patched ' + seninf_path + ': 共包住 ' + str(patched_count) + ' 处')
             else:
-                print('WARN ' + seninf_path + ': 未找到任何引用，请检查文件')
+                count = src.count('imgsensor_ca_invoke_command')
+                print('WARN ' + seninf_path + ': 未找到任何引用，该符号出现 ' + str(count) + ' 次')
 
         except Exception as e:
             print('skip ' + seninf_path + ': ' + str(e))
 else:
     print('ERROR: 找不到 seninf.c，补丁未注入')
+
+# ── 集成 KernelSU-Next ───────────────────────────────────────────────────────
+print('\n>>> 开始集成 KernelSU-Next')
+
+ksu_dst = 'drivers/kernelsu'
+defconfig = 'arch/arm64/configs/camellia_defconfig'
+
+try:
+    # 1. clone KernelSU-Next 到 drivers/kernelsu
+    if not os.path.exists(ksu_dst):
+        print('正在 clone KernelSU-Next...')
+        subprocess.run([
+            'git', 'clone',
+            'https://github.com/KernelSU-Next/KernelSU-Next.git',
+            '--depth=1',
+            ksu_dst
+        ], check=True)
+        print('clone 完成')
+    else:
+        print('skip clone: ' + ksu_dst + ' 已存在，尝试更新')
+        subprocess.run(['git', '-C', ksu_dst, 'pull', '--depth=1'],
+                       check=False)
+
+    # 2. 确认 KSU kernel 子目录存在
+    ksu_kernel_dir = os.path.join(ksu_dst, 'kernel')
+    if not os.path.isdir(ksu_kernel_dir):
+        raise FileNotFoundError('KSU kernel 子目录不存在: ' + ksu_kernel_dir)
+    print('KSU kernel 子目录确认: ' + ksu_kernel_dir)
+
+    # 3. 在 drivers/Makefile 里加入编译入口
+    drivers_mk = 'drivers/Makefile'
+    with open(drivers_mk, 'r', errors='replace') as f:
+        mk_src = f.read()
+    if 'kernelsu' not in mk_src:
+        with open(drivers_mk, 'a') as f:
+            f.write('\n# KernelSU-Next\nobj-$(CONFIG_KSU) += kernelsu/kernel/\n')
+        print('patched drivers/Makefile: 加入 KSU 编译入口')
+    else:
+        print('skip drivers/Makefile: KSU 入口已存在')
+
+    # 4. 在 defconfig 里开启 CONFIG_KSU 和依赖项
+    with open(defconfig, 'r', errors='replace') as f:
+        def_src = f.read()
+
+    configs_to_add = []
+
+    # CONFIG_KSU 主开关
+    if 'CONFIG_KSU=' not in def_src:
+        configs_to_add.append('CONFIG_KSU=y')
+    else:
+        # 确保是 y 不是 n
+        def_src = re.sub(r'CONFIG_KSU=n', 'CONFIG_KSU=y', def_src)
+        print('CONFIG_KSU 已存在，确认为 y')
+
+    # KPROBES 相关（KSU hook 依赖）
+    for cfg in [
+        'CONFIG_KPROBES',
+        'CONFIG_HAVE_KPROBES',
+        'CONFIG_KPROBE_EVENTS',
+        'CONFIG_KALLSYMS',
+        'CONFIG_KALLSYMS_ALL',
+    ]:
+        if cfg + '=y' not in def_src and cfg + '=' not in def_src:
+            configs_to_add.append(cfg + '=y')
+
+    if configs_to_add:
+        with open(defconfig, 'a') as f:
+            f.write('\n# KernelSU-Next\n')
+            for cfg in configs_to_add:
+                f.write(cfg + '\n')
+        print('patched defconfig: 加入 ' + str(configs_to_add))
+    else:
+        print('skip defconfig: 所有 KSU 配置已存在')
+
+    # 5. 如果内核不支持 kprobes，改用手动 hook 模式
+    # 检查 defconfig 里是否明确禁用了 KPROBES
+    with open(defconfig, 'r', errors='replace') as f:
+        def_src_check = f.read()
+    if '# CONFIG_KPROBES is not set' in def_src_check:
+        print('WARN: KPROBES 被禁用，KSU 将使用手动 hook 模式')
+        print('      需要手动在 fs/exec.c / fs/open.c / fs/read_write.c 添加 KSU hook 调用')
+        print('      参考: https://kernelsu.org/guide/how-to-integrate-for-non-gki.html')
+
+    print('>>> KernelSU-Next 集成完成')
+
+except subprocess.CalledProcessError as e:
+    print('ERROR: git 操作失败: ' + str(e))
+except Exception as e:
+    print('ERROR: KernelSU-Next 集成失败: ' + str(e))
