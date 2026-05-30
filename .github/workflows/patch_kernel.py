@@ -271,8 +271,8 @@ try:
 except Exception as e:
     print('skip ' + nt36_path + ': ' + str(e))
 
-# ── Fix: imgsensor_ca_invoke_command 缺失/冲突符号 ───────────────────────────
-# 不注入 stub 定义（会导致签名冲突），改为用 #ifdef 包住调用点和 extern 声明
+# ── Fix: imgsensor_ca_invoke_command 链接期缺失符号 ──────────────────────────
+# 用逐行扫描替代 regex，正确处理跨行调用
 
 seninf_candidates = [
     'drivers/misc/mediatek/imgsensor/src/common/v1_1/seninf.c',
@@ -292,36 +292,43 @@ if seninf_paths:
     for seninf_path in seninf_paths:
         try:
             with open(seninf_path, 'r', errors='replace') as f:
-                src = f.read()
+                lines = f.readlines()
 
-            if 'AUTO-PATCHED-IFDEF' in src:
+            if any('AUTO-PATCHED-IFDEF' in l for l in lines):
                 print('skip ' + seninf_path + ': 已打过补丁')
                 continue
 
-            new_src = src
+            new_lines = []
+            i = 0
+            patched_count = 0
 
-            # 1. 把 extern 声明用 #ifdef 包起来，避免签名冲突
-            new_src = re.sub(
-                r'(?m)^([ \t]*extern\s+int\s+imgsensor_ca_invoke_command\s*\([^;]+;\s*)$',
-                '#ifdef CONFIG_IMGSENSOR_CA /* AUTO-PATCHED-IFDEF */\n\\1\n#endif',
-                new_src
-            )
+            while i < len(lines):
+                line = lines[i]
 
-            # 2. 把每一处调用语句用 #ifdef 包起来
-            new_src = re.sub(
-                r'(?m)^([ \t]*)((?:\w+\s*=\s*)?imgsensor_ca_invoke_command\s*\([^;]+;\s*)$',
-                '#ifdef CONFIG_IMGSENSOR_CA /* AUTO-PATCHED-IFDEF */\n\\1\\2\n#endif',
-                new_src
-            )
+                if 'imgsensor_ca_invoke_command' in line:
+                    # 收集完整语句直到遇到分号（处理跨行）
+                    block = line
+                    j = i + 1
+                    while ';' not in block and j < len(lines):
+                        block += lines[j]
+                        j += 1
 
-            if new_src != src:
+                    new_lines.append('#ifdef CONFIG_IMGSENSOR_CA /* AUTO-PATCHED-IFDEF */\n')
+                    new_lines.append(block)
+                    new_lines.append('#endif /* CONFIG_IMGSENSOR_CA */\n')
+                    patched_count += 1
+                    i = j
+                    continue
+
+                new_lines.append(line)
+                i += 1
+
+            if patched_count > 0:
                 with open(seninf_path, 'w') as f:
-                    f.write(new_src)
-                print('patched ' + seninf_path + ': 已用 #ifdef 包住调用点')
+                    f.writelines(new_lines)
+                print('patched ' + seninf_path + ': 共包住 ' + str(patched_count) + ' 处')
             else:
-                count = src.count('imgsensor_ca_invoke_command')
-                print('WARN ' + seninf_path + ': regex 未匹配，该符号出现 '
-                      + str(count) + ' 次，请检查调用是否跨行')
+                print('WARN ' + seninf_path + ': 未找到任何引用，请检查文件')
 
         except Exception as e:
             print('skip ' + seninf_path + ': ' + str(e))
