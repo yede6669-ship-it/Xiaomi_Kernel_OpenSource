@@ -168,10 +168,17 @@ jobs:
           sed -i 's/CONFIG_CFI_PERMISSIVE=y/# CONFIG_CFI_PERMISSIVE is not set/' out/.config
           echo "# CONFIG_CFI_CLANG is not set" >> out/.config
           echo "# CONFIG_CFI_PERMISSIVE is not set" >> out/.config
+          echo ">>> 注入 KSU 配置"
+          sed -i '/^CONFIG_KSU/d' out/.config
+          echo "CONFIG_KSU=y" >> out/.config
+          for cfg in CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
+            sed -i "/^${cfg}/d" out/.config
+            echo "${cfg}=y" >> out/.config
+          done
           echo ">>> olddefconfig"
           make $COMMON_FLAGS olddefconfig < /dev/null
           echo ">>> 验证关键配置"
-          grep -E "STACKPROTECTOR|CFI" out/.config || true
+          grep -E "STACKPROTECTOR|CFI|KSU|KPROBES|KALLSYMS" out/.config || true
 
       - name: Build kernel
         working-directory: kernel
@@ -209,11 +216,68 @@ jobs:
             exit $BUILD_EXIT
           fi
 
+      - name: 打包 AnyKernel3 ZIP
+        if: success()
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git --depth=1 AnyKernel3
+          rm -f AnyKernel3/README.md
+          rm -rf AnyKernel3/ramdisk AnyKernel3/patch
+
+          # 复制内核文件
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ 2>/dev/null || \
+          cp kernel/out/arch/arm64/boot/Image.gz     AnyKernel3/ 2>/dev/null || \
+          cp kernel/out/arch/arm64/boot/Image        AnyKernel3/
+
+          # 写入 anykernel.sh
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          properties() { '
+          kernel.string=Camellia Kernel with KernelSU-Next
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=camellia
+          device.name2=camellian
+          device.name3=
+          supported.versions=
+          supported.patchlevels=
+          '; }
+
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          EOF
+
+          # 打包成 ZIP
+          cd AnyKernel3
+          zip -r9 \
+            ../camellia-kernel-KSU-${{ github.run_number }}.zip \
+            . \
+            -x "*.git*"
+          cd ..
+          echo ">>> 打包完成"
+          ls -lh camellia-kernel-KSU-${{ github.run_number }}.zip
+
       - name: Check build output
         if: always()
         run: |
           ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
           find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
+
+      - name: Upload AnyKernel3 ZIP
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellia-kernel-KSU-zip-${{ github.run_number }}
+          path: camellia-kernel-KSU-${{ github.run_number }}.zip
+          retention-days: 7
 
       - name: Upload kernel image
         if: success()
