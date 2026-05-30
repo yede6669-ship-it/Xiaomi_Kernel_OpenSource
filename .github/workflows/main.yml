@@ -168,17 +168,10 @@ jobs:
           sed -i 's/CONFIG_CFI_PERMISSIVE=y/# CONFIG_CFI_PERMISSIVE is not set/' out/.config
           echo "# CONFIG_CFI_CLANG is not set" >> out/.config
           echo "# CONFIG_CFI_PERMISSIVE is not set" >> out/.config
-          echo ">>> 注入 KSU 配置"
-          sed -i '/^CONFIG_KSU/d' out/.config
-          echo "CONFIG_KSU=y" >> out/.config
-          for cfg in CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
-            sed -i "/^${cfg}/d" out/.config
-            echo "${cfg}=y" >> out/.config
-          done
           echo ">>> olddefconfig"
           make $COMMON_FLAGS olddefconfig < /dev/null
           echo ">>> 验证关键配置"
-          grep -E "STACKPROTECTOR|CFI|KSU|KPROBES|KALLSYMS" out/.config || true
+          grep -E "STACKPROTECTOR|CFI" out/.config || true
 
       - name: Build kernel
         working-directory: kernel
@@ -216,74 +209,92 @@ jobs:
             exit $BUILD_EXIT
           fi
 
-      - name: 打包 AnyKernel3 ZIP
-        if: success()
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git --depth=1 AnyKernel3
-          rm -f AnyKernel3/README.md
-          rm -rf AnyKernel3/ramdisk AnyKernel3/patch
-
-          # 复制内核文件
-          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ 2>/dev/null || \
-          cp kernel/out/arch/arm64/boot/Image.gz     AnyKernel3/ 2>/dev/null || \
-          cp kernel/out/arch/arm64/boot/Image        AnyKernel3/
-
-          # 写入 anykernel.sh
-          cat > AnyKernel3/anykernel.sh << 'EOF'
-          properties() { '
-          kernel.string=Camellia Kernel with KernelSU-Next
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=camellia
-          device.name2=camellian
-          device.name3=
-          supported.versions=
-          supported.patchlevels=
-          '; }
-
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=0;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-
-          . tools/ak3-core.sh;
-
-          split_boot;
-          flash_boot;
-          EOF
-
-          # 打包成 ZIP
-          cd AnyKernel3
-          zip -r9 \
-            ../camellia-kernel-KSU-${{ github.run_number }}.zip \
-            . \
-            -x "*.git*"
-          cd ..
-          echo ">>> 打包完成"
-          ls -lh camellia-kernel-KSU-${{ github.run_number }}.zip
-
       - name: Check build output
         if: always()
         run: |
           ls -lh kernel/out/arch/arm64/boot/ 2>/dev/null || echo "boot dir not found"
           find kernel/out -name "Image*" 2>/dev/null || echo "No Image files found"
 
-      - name: Upload AnyKernel3 ZIP
+      # ──────────────────────────────────────────────
+      # AnyKernel3 打包
+      # ──────────────────────────────────────────────
+      - name: Clone AnyKernel3
+        if: success()
+        run: |
+          # 如果你有自己定制好的 AnyKernel3 仓库，把下面地址换掉
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+      - name: Configure AnyKernel3 for camellia
+        if: success()
+        run: |
+          cd AnyKernel3
+          # 基本信息
+          sed -i 's/kernel.string=.*/kernel.string=Camellia Kernel by GitHub Actions #${{ github.run_number }}/' anykernel.sh
+          # 设备校验：只允许 camellia 刷入；如不需要校验设备直接改成 0
+          sed -i 's/do.devicecheck=.*/do.devicecheck=1/' anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=camellia/' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=/' anykernel.sh
+          sed -i 's/device.name3=.*/device.name3=/' anykernel.sh
+          sed -i 's/device.name4=.*/device.name4=/' anykernel.sh
+          sed -i 's/device.name5=.*/device.name5=/' anykernel.sh
+          # 分区路径（camellia 标准路径）
+          sed -i 's|block=/dev/.*|block=/dev/block/platform/bootdevice/by-name/boot;|' anykernel.sh
+          sed -i 's/is.slot.device=.*/is.slot.device=0/' anykernel.sh
+          sed -i 's/ramdisk.compression=.*/ramdisk.compression=auto/' anykernel.sh
+
+      - name: Copy kernel image into AnyKernel3
+        if: success()
+        run: |
+          # 按优先级复制，只取第一个存在的镜像
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+            echo "Copied Image.gz-dtb"
+          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+            echo "Copied Image.gz"
+          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+            echo "Copied Image"
+          else
+            echo "ERROR: 没有找到任何内核镜像！"
+            exit 1
+          fi
+          # dtbo（可选，如不需要注释掉）
+          if [ -f kernel/out/arch/arm64/boot/dtbo.img ]; then
+            cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/
+            echo "Copied dtbo.img"
+          fi
+
+      - name: Package AnyKernel3 zip
+        if: success()
+        run: |
+          ZIP_NAME="Camellia-Kernel-${{ github.run_number }}-$(date -u +%Y%m%d).zip"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" . \
+            -x "*.git*" \
+            -x "README.md" \
+            -x "*.placeholder" \
+            -x "LICENSE"
+          echo ">>> 打包完成: ${ZIP_NAME}"
+          ls -lh "../${ZIP_NAME}"
+
+      - name: Upload AnyKernel3 zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: camellia-kernel-KSU-zip-${{ github.run_number }}
-          path: camellia-kernel-KSU-${{ github.run_number }}.zip
+          name: Camellia-AnyKernel3-${{ github.run_number }}
+          path: ${{ env.ZIP_NAME }}
           retention-days: 7
 
-      - name: Upload kernel image
+      # ──────────────────────────────────────────────
+      # 原始镜像（备用）
+      # ──────────────────────────────────────────────
+      - name: Upload kernel image (raw)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: camellia-kernel-${{ github.run_number }}
+          name: camellia-kernel-image-${{ github.run_number }}
           path: |
             kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel/out/arch/arm64/boot/Image.gz
